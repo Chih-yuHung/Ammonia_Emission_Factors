@@ -1,0 +1,13 @@
+name: Ammonia_Emission_Factors
+title: Ammonia_Emission_Factors
+username: cyhung
+account: cyhung
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 17354352
+bundleId: 11989741
+url: https://cyhung.shinyapps.io/Ammonia_Emission_Factors/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: README.Rmd
