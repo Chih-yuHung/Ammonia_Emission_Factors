@@ -1,73 +1,105 @@
 ---
 title: "NH<sub>3</sub> Emission Factor Shiny App"
-author: Chih-Yu Hung
 output: html_document
 ---
 
 ## Overview
 
-This project contains a Shiny app for estimating monthly NH<sub>3</sub> emission factors from manure temperature and optional monthly NH<sub>3</sub> emissions from TAN.
+This project contains a Shiny app for estimating NH<sub>3</sub> emissions from either animal housing or manure storage.
 
-The app is based on the temperature-correction relationship documented in [NH3_EF_correction_notes.md](NH3_EF_correction_notes.md).
+The app has two calculation sections:
 
-## Core Equation
+- `Housing`: uses Total N and housing correction factors from `Reference/NH3_Correction_Factors.csv`.
+- `Storage`: uses TAN and the existing storage mass-flow model with storage/cover factors and optional removal assumptions.
+
+## Housing Calculation
+
+Housing emission factors are based on real farm observations, mostly from cool temperate moist regions.
+
+Reference climate source:
+
+`Reference Global Climate Zone, 1995-2024`
+
+The housing correction equation is:
+
+`EF_T = EFref_TotalN * CT^(T - Tref)`
+
+Where:
+
+- `EFref_TotalN` is the reference housing emission factor in `kg NH3-N/kg Total N`
+- `CT` is selected from `CT_wet` or `CT_dry`
+- `T` is the user-provided housing temperature
+- `Tref` is the reference temperature
+
+Monthly reference temperatures from January to December are:
+
+`-5.4, -4.4, 0.4, 6.6, 11.8, 16.4, 18.8, 17.8, 13.1, 7.7, 2.4, -2.9`
+
+The annual reference temperature is:
+
+`6.8`
+
+If `EFs_TotalN` is missing in the correction-factor file, the app uses the matching app default `EFTref` converted from percent to decimal. For example, Sheep `25.0%` becomes `0.25`, and Swine `29.6%` becomes `0.296`.
+
+Some CT values are only applicable over certain temperature ranges. These notes are displayed in the app and included in the downloaded CSV, but the app does not enforce the temperature thresholds.
+
+Housing emissions are calculated as:
+
+`NH3 emission = Total N * corrected EF`
+
+## Storage Calculation
+
+Storage keeps the existing TAN-based model.
 
 For each month, the app calculates:
 
 `EF_T = EFTref * CT^(T - Tref)`
 
-Where:
+Then applies the storage/cover multiplier:
 
-- `T` is the monthly average manure temperature in `deg C`
-- `Tref` is the reference temperature in `deg C`
-- `EFTref` is the emission factor at `Tref`, in percent
-- `CT` is the animal-specific temperature correction coefficient
+`Adjusted EF = EF_T * storage/cover multiplier`
 
-The annual emission factor is the simple arithmetic mean of the 12 monthly values.
+If TAN is provided, the app:
 
-## Optional NH<sub>3</sub> Emissions
+1. Removes the selected percentage of TAN already stored if the month is a removal month.
+2. Adds the current month's generated TAN.
+3. Calculates NH<sub>3</sub> emission as:
 
-If the user enters `Monthly TAN (kg N)`, the app also calculates:
+`Monthly NH3 emission = min(TAN available, TAN available * Adjusted EF / 100)`
 
-`Monthly NH3 emission = Monthly TAN * EF / 100`
+4. Carries remaining TAN forward to the next month.
 
-Output units:
+Removed TAN leaves the storage model and is not counted as later field-application NH<sub>3</sub> emission in this app version.
 
-- `Monthly TAN`: `kg N`
-- `NH<sub>3</sub> emission`: `kg NH<sub>3</sub>-N`
+## Temperature CSV Upload
 
-The same monthly TAN value is applied to all 12 months.
+Users can upload multiple monthly temperature scenarios with this wide CSV format:
 
-## Animal Defaults
+`Scenario,Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec`
 
-The app includes the following built-in animal defaults:
+The file `temperature_upload_template.csv` provides an example.
 
-| Animal type | CT | Default EFTref (%) |
-|---|---:|---:|
-| DAIRY_CATTLE | 1.056 | 12.2 |
-| BEEF_CATTLE | 1.065 | 10.0 |
-| OTHER_CATTLE | 1.062 | 7.6 |
-| BUFFALO_BEEF | 1.067 | 13.4 |
-| SHEEP | 1.049 | 25.0 |
-| PIG | 1.036 | 29.6 |
-
-`EFTref` is auto-filled from the animal type and remains editable.
+Uploaded scenarios use the currently selected calculation section and assumptions. They are included in the downloaded CSV results but are not plotted in the app.
 
 ## App Features
 
-- Animal-type dropdown with animal-specific `CT`
-- Editable `Tref` and `EFTref`
-- Twelve monthly manure temperature inputs from January to December
-- `Plot` button to trigger calculations
-- Monthly line chart of EF with manure temperature overlay
-- Annual average EF label on the chart
-- Optional NH<sub>3</sub> emission calculation from monthly TAN
-- Downloadable CSV output
+- Top-level Housing or Storage calculation selector
+- Housing-specific animal, housing, manure type, correction-factor row, and wet/dry CT inputs
+- Housing Total N input as annual Total N or 12 monthly Total N values
+- Storage-specific animal, storage, cover/crust, removal, and TAN inputs
+- Manual annual or monthly temperature inputs for housing
+- Manual monthly manure temperature inputs for storage
+- Batch monthly temperature CSV upload
+- Downloadable temperature template CSV
+- Downloadable results CSV including uploaded scenarios
 
 ## Files
 
-- [app.R](app.R): main Shiny application
-- [NH3_EF_correction_notes.md](NH3_EF_correction_notes.md): source notes for the calculation logic
+- `app.R`: main Shiny application
+- `Reference/NH3_Correction_Factors.csv`: housing correction-factor source used by the app
+- `Reference/NH3_Correction_Factors.xlsx`: source workbook for housing correction factors
+- `temperature_upload_template.csv`: monthly temperature upload template
+- `NH3_EF_correction_notes.md`: source notes for the temperature-correction logic
 
 ## Run The App
 
@@ -82,9 +114,3 @@ Or run the file directly:
 ```r
 source("app.R")
 ```
-
-## Notes
-
-- The app uses a simple 12-month average for annual EF.
-- The chart shows EF as a solid line and manure temperature as a dashed line.
-- The downloaded CSV uses plain-text column names for compatibility, including units where relevant.

@@ -1,13 +1,13 @@
-name: Ammonia_Emission_Factors
-title: Ammonia_Emission_Factors
+name: Ammonia_emission_factors
+title: Ammonia_emission_factors
 username: cyhung
 account: cyhung
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
-appId: 17354352
-bundleId: 11989741
-url: https://cyhung.shinyapps.io/Ammonia_Emission_Factors/
+appId: 17389598
+bundleId: 12026065
+url: https://cyhung.shinyapps.io/Ammonia_emission_factors/
 version: 1
 asMultiple: FALSE
 asStatic: FALSE
-ignoredFiles: README.Rmd
+ignoredFiles: Data_Compilation_NH3.xlsx|NH3_EF_correction.pptx|NH3_EF_correction_notes.md|Principal.md|Reference/19R_V4_Ch10_Livestock.pdf|Reference/NH3_Correction_Factors.csv|Reference/NH3_Correction_Factors.xlsx|Reference/NH3_EF_T_correction.xlsx|Reference/V4_10_Ch10_Livestock_2006 version.pdf|Storage template_agus.xlsx
