@@ -1,0 +1,219 @@
+---
+title: "README: Proposed Tier 2 Housing NH3 Emission Factors"
+output: html_document
+---
+
+## Purpose
+
+This note documents the calculation in `Proposed_Tier2_Housing.qmd`.
+
+The goal is to prepare proposed Tier 2 ammonia (`NH3-N`) emission factors for
+animal housing by animal type, housing type, manure type, and broad climate
+zone. The current method uses annual temperature only.
+
+## Input Files
+
+The calculation uses these input files:
+
+```text
+Inputs/NH3_Correction_Factors.xlsx
+Inputs/Climate_zone_temperatures.xlsx
+```
+
+Use `Inputs/NH3_Correction_Factors.xlsx`, sheet `Housing`, for the updated
+housing reference EFs and CT values. The required columns are:
+
+- `Animal_Type`
+- `Housing`
+- `Manure_type`
+- `EFs_TotalN`
+- `EFs_Lower`
+- `EFs_Upper`
+- `EF_Ref_15`
+- `CT_15`
+- `CT_Lower`
+- `CT_Upper`
+- `Note`
+
+`EFs_TotalN` is the reference emission factor in
+`kg NH3-N / kg Total N`.
+
+`EF_Ref_15` is the modelled EF at 15 degrees C. It is retained in the input
+file for comparison and documentation, but it is not used in the current final
+output.
+
+Use `Inputs/Climate_zone_temperatures.xlsx`, `Sheet2`, for climate
+temperatures. For each month, the workbook provides `Median` and `Std` values.
+
+## Output Files
+
+The qmd writes:
+
+```text
+Outputs/Proposed_Tier2_Housing.csv
+Outputs/Proposed_Tier2_Housing_MC_Summary.csv
+```
+
+`Outputs/Proposed_Tier2_Housing.csv` is the main deterministic output. It is
+recreated from the rows in `Inputs/NH3_Correction_Factors.xlsx$Housing`.
+
+The final wide output columns are:
+
+```text
+Animal_Type
+Housing
+Manure_type
+Tropical
+Warm_Temperate
+Cool_Temperate
+Boreal
+```
+
+`Outputs/Proposed_Tier2_Housing_MC_Summary.csv` provides the Monte Carlo mean
+and 95% confidence interval for every animal/housing/manure/climate-zone
+combination.
+
+## Climate Zone Aggregation
+
+Only four broad climate zones are used:
+
+```r
+broad_climate_map <- list(
+  Tropical = c("Tropical Wet", "Tropical Moist", "Tropical Dry"),
+  Warm_Temperate = c("Warm Temperate Moist", "Warm Temperate Dry"),
+  Cool_Temperate = c("Cool Temperate Moist", "Cool Temperate Dry"),
+  Boreal = c("Boreal Moist", "Boreal Dry")
+)
+```
+
+For each broad climate zone:
+
+1. Average the component climate-zone monthly median temperatures.
+2. Average those 12 broad-zone monthly medians to obtain one annual
+   temperature.
+
+`Polar` is excluded because it is not used for livestock industry estimates in
+this proposal.
+
+## Deterministic EF Method
+
+The deterministic output follows the requested exponential correction:
+
+```r
+EF <- EFs_TotalN * CT_15^(T_annual - 15)
+```
+
+where:
+
+- `EFs_TotalN` is the reference EF from the Housing sheet.
+- `CT_15` is the temperature correction factor estimated at 15 degrees C.
+- `T_annual` is the broad climate-zone annual temperature.
+- `15` is the reference temperature in degrees C.
+
+The EF is capped at `ef_max`, currently set in the qmd preparation chunk:
+
+```r
+ef_max <- 1
+```
+
+Final deterministic EFs are rounded to 3 decimals.
+
+## Reference EF Caveat
+
+The input file includes both `EFs_TotalN` and `EF_Ref_15`.
+
+The current final output uses `EFs_TotalN` as if it is the reference EF at
+15 degrees C. This is a practical assumption for the requested proposal, but it
+is not fully resolved scientifically because `EFs_TotalN` is a global average
+and the source table does not identify the average temperature at which those
+reference EFs were obtained.
+
+Using `EF_Ref_15` with `CT_15` would be more internally consistent with a
+modelled 15 degrees C anchor, but it is not the selected method for the current
+main output.
+
+## CT Applicability
+
+The qmd uses one CT column:
+
+```text
+CT_15
+```
+
+The old wet/dry CT logic is not used.
+
+If the `Note` column contains a threshold such as:
+
+```text
+Only applicable to T >15
+```
+
+then CT is applied only when annual temperature is above that threshold. If the
+threshold is not met, the EF remains `EFs_TotalN`.
+
+If there is no threshold in `Note`, CT is applied for all annual temperatures.
+
+## Monte Carlo Method
+
+The Monte Carlo simulation is included to propagate uncertainty from:
+
+- annual temperature
+- reference EF
+- CT
+
+Settings:
+
+```r
+set.seed(2026)
+n_iter <- 5000
+```
+
+### Temperature Uncertainty
+
+Monthly temperatures are not sampled independently. Independent monthly draws
+can create unrealistic simulated years, such as an extremely hot July followed
+by an extremely cold August.
+
+Instead, the qmd uses an annual-only sampling approach:
+
+```r
+T_annual_sim <- rnorm(n_iter, mean = T_annual, sd = T_annual_sd)
+```
+
+`T_annual_sd` is calculated as the simple average of the monthly `Std` values
+across all component climate zones and months for the broad climate zone.
+
+### EF and CT Uncertainty
+
+`EFs_TotalN` is sampled using `EFs_Lower` and `EFs_Upper`.
+
+`CT_15` is sampled using `CT_Lower` and `CT_Upper`.
+
+Both are sampled with bounded lognormal distributions based on the 95% CI
+ranges. Values outside their CI bounds are resampled.
+
+For each simulation:
+
+```r
+EF_sim <- EFs_TotalN_sim * CT_15_sim^(T_annual_sim - 15)
+```
+
+If a threshold rule from `Note` is not met, the simulation uses
+`EFs_TotalN_sim` directly.
+
+All simulated EFs are capped at `ef_max`.
+
+## Checks Before Finalizing
+
+After running the qmd, check:
+
+- `Outputs/Proposed_Tier2_Housing.csv` is written.
+- `Outputs/Proposed_Tier2_Housing.csv` has only four climate-zone EF columns.
+- deterministic EFs are rounded to 3 decimals.
+- deterministic EFs do not exceed `ef_max`.
+- `Outputs/Proposed_Tier2_Housing_MC_Summary.csv` is written.
+- Monte Carlo summary has one row per Housing-sheet row and broad climate zone.
+- Monte Carlo mean and 95% CI columns are rounded to 3 decimals.
+- threshold notes are applied using annual temperature, not monthly temperature.
+- the qmd does not independently sample 12 monthly temperatures within one
+  simulated year.

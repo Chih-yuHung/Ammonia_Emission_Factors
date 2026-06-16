@@ -1,0 +1,536 @@
+---
+title: "Proposed Tier 2 Housing NH3 Emission Factors"
+format: html
+---
+
+## Overview
+
+This file calculates proposed Tier 2 housing ammonia emission factors by
+animal type, housing type, manure type, and broad climate zone.
+
+The deterministic output uses annual temperature and the updated housing
+correction-factor table:
+
+```text
+EF = EFs_TotalN * CT_15^(T_annual - 15)
+```
+
+`EFs_TotalN` is treated as the reference EF at 15 degrees C for this proposal,
+even though the source table describes it as a global average.
+
+## Preparation
+
+```{r}
+#| label: preparation
+#| message: false
+#| warning: false
+
+library(readxl)
+
+# Month order used in the climate workbook.
+month_labels <- c(
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+)
+
+# Upper cap for emission factors.
+# Revise this value if a different maximum EF is needed.
+ef_max <- 1
+
+# Monte Carlo settings.
+set.seed(2026)
+n_iter <- 5000
+
+# Project file paths.
+paths <- list(
+  factors_xlsx = file.path("Inputs", "NH3_Correction_Factors.xlsx"),
+  climate_xlsx = file.path("Inputs", "Climate_zone_temperatures.xlsx"),
+  proposed_csv = file.path("Outputs", "Proposed_Tier2_Housing.csv"),
+  mc_summary_csv = file.path("Outputs", "Proposed_Tier2_Housing_MC_Summary.csv")
+)
+
+# The final proposal uses four broad climate zones.
+broad_climate_map <- list(
+  Tropical = c("Tropical Wet", "Tropical Moist", "Tropical Dry"),
+  Warm_Temperate = c("Warm Temperate Moist", "Warm Temperate Dry"),
+  Cool_Temperate = c("Cool Temperate Moist", "Cool Temperate Dry"),
+  Boreal = c("Boreal Moist", "Boreal Dry")
+)
+
+id_cols <- c("Animal_Type", "Housing", "Manure_type")
+climate_cols <- names(broad_climate_map)
+```
+
+## Input Data
+
+```{r}
+#| label: input-data
+#| message: false
+#| warning: false
+
+# Read the updated housing EF and CT table.
+factors <- as.data.frame(
+  readxl::read_excel(paths$factors_xlsx, sheet = "Housing"),
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+names(factors) <- trimws(names(factors))
+
+# Keep the text columns stable for matching and output.
+text_cols <- c(id_cols, "Note")
+for (col in intersect(text_cols, names(factors))) {
+  factors[[col]] <- trimws(as.character(factors[[col]]))
+}
+factors$Note[is.na(factors$Note) | factors$Note == "NA"] <- ""
+
+# Convert numeric columns from Excel to numeric R vectors.
+numeric_cols <- c(
+  "EFs_TotalN", "EFs_Lower", "EFs_Upper",
+  "EF_Ref_15", "CT_15", "CT_Lower", "CT_Upper"
+)
+for (col in numeric_cols) {
+  factors[[col]] <- suppressWarnings(as.numeric(factors[[col]]))
+}
+
+# Recreate the output skeleton directly from the updated input sheet.
+proposed_result <- factors[id_cols]
+```
+
+## Climate Temperatures
+
+```{r}
+#| label: climate-temperatures
+#| message: false
+#| warning: false
+
+# Sheet2 has two header rows: month names in row 1 and Median/Std in row 2.
+climate_raw <- readxl::read_excel(
+  paths$climate_xlsx,
+  sheet = "Sheet2",
+  col_names = FALSE,
+  .name_repair = "minimal"
+)
+
+month_median_cols <- 2 + (seq_along(month_labels) - 1) * 2
+month_std_cols <- 3 + (seq_along(month_labels) - 1) * 2
+
+climate_medians <- as.data.frame(
+  climate_raw[-c(1, 2), c(1, month_median_cols)],
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+climate_stds <- as.data.frame(
+  climate_raw[-c(1, 2), c(1, month_std_cols)],
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+names(climate_medians) <- c("Climate_zone", month_labels)
+names(climate_stds) <- c("Climate_zone", month_labels)
+
+clean_climate_table <- function(climate_table) {
+  climate_table$Climate_zone <- trimws(as.character(climate_table$Climate_zone))
+  climate_table <- climate_table[
+    !is.na(climate_table$Climate_zone) &
+      nzchar(climate_table$Climate_zone) &
+      climate_table$Climate_zone != "0",
+    ,
+    drop = FALSE
+  ]
+
+  for (month in month_labels) {
+    climate_table[[month]] <- suppressWarnings(as.numeric(climate_table[[month]]))
+  }
+
+  climate_table
+}
+
+climate_medians <- clean_climate_table(climate_medians)
+climate_stds <- clean_climate_table(climate_stds)
+
+get_climate_matrix <- function(climate_table, component_zones) {
+  climate_rows <- climate_table[climate_table$Climate_zone %in% component_zones, ]
+
+  if (nrow(climate_rows) != length(component_zones)) {
+    stop(
+      "Expected climate rows for: ",
+      paste(component_zones, collapse = ", ")
+    )
+  }
+
+  as.matrix(climate_rows[month_labels])
+}
+
+# Annual temperatures are calculated after aggregating component climate zones
+# into the four broad zones.
+broad_climate_summary <- data.frame(
+  Climate_zone = climate_cols,
+  Annual_Temperature_C = NA_real_,
+  Annual_Temperature_SD_C = NA_real_,
+  stringsAsFactors = FALSE
+)
+
+for (climate_col in climate_cols) {
+  component_zones <- broad_climate_map[[climate_col]]
+  median_matrix <- get_climate_matrix(climate_medians, component_zones)
+  std_matrix <- get_climate_matrix(climate_stds, component_zones)
+
+  monthly_broad_medians <- colMeans(median_matrix, na.rm = TRUE)
+
+  broad_climate_summary[
+    broad_climate_summary$Climate_zone == climate_col,
+    "Annual_Temperature_C"
+  ] <- mean(monthly_broad_medians, na.rm = TRUE)
+
+  # The Monte Carlo uses one annual temperature draw. Its SD is the simple
+  # average of all component-zone monthly Std values for the broad climate zone.
+  broad_climate_summary[
+    broad_climate_summary$Climate_zone == climate_col,
+    "Annual_Temperature_SD_C"
+  ] <- mean(as.numeric(std_matrix), na.rm = TRUE)
+}
+
+broad_climate_summary
+```
+
+## Calculation Functions
+
+```{r}
+#| label: calculation-functions
+#| message: false
+#| warning: false
+
+cap_ef <- function(ef_value) {
+  pmin(ef_value, ef_max)
+}
+
+# Notes such as "Only applicable to T >15" define the minimum annual
+# temperature required before CT is applied.
+threshold_from_note <- function(note) {
+  note <- as.character(note)
+  match_text <- regmatches(
+    note,
+    regexpr(">[[:space:]]*[-+]?[0-9]*\\.?[0-9]+", note)
+  )
+
+  if (length(match_text) == 0 || is.na(match_text) || match_text == "") {
+    return(NA_real_)
+  }
+
+  as.numeric(gsub(">|[[:space:]]", "", match_text))
+}
+
+ct_is_applicable <- function(ct, annual_temperature_c, note) {
+  if (is.na(ct)) {
+    return(FALSE)
+  }
+
+  threshold_c <- threshold_from_note(note)
+  if (is.na(threshold_c)) {
+    return(TRUE)
+  }
+
+  annual_temperature_c > threshold_c
+}
+
+calculate_annual_ef <- function(ef_ref, ct, annual_temperature_c, note) {
+  if (ct_is_applicable(ct, annual_temperature_c, note)) {
+    corrected_ef <- ef_ref * ct^(annual_temperature_c - 15)
+  } else {
+    corrected_ef <- ef_ref
+  }
+
+  cap_ef(corrected_ef)
+}
+```
+
+## Annual EF Calculation
+
+```{r}
+#| label: annual-ef-calculation
+#| message: false
+#| warning: false
+
+deterministic_detail_rows <- list()
+deterministic_detail_index <- 1
+
+for (row_index in seq_len(nrow(factors))) {
+  for (climate_col in climate_cols) {
+    annual_temp <- broad_climate_summary[
+      broad_climate_summary$Climate_zone == climate_col,
+      "Annual_Temperature_C"
+    ]
+
+    ef_value <- calculate_annual_ef(
+      ef_ref = factors$EFs_TotalN[row_index],
+      ct = factors$CT_15[row_index],
+      annual_temperature_c = annual_temp,
+      note = factors$Note[row_index]
+    )
+
+    proposed_result[row_index, climate_col] <- round(ef_value, 3)
+
+    deterministic_detail_rows[[deterministic_detail_index]] <- data.frame(
+      Animal_Type = factors$Animal_Type[row_index],
+      Housing = factors$Housing[row_index],
+      Manure_type = factors$Manure_type[row_index],
+      Climate_zone = climate_col,
+      Annual_Temperature_C = round(annual_temp, 3),
+      EFref_TotalN = factors$EFs_TotalN[row_index],
+      CT_15 = factors$CT_15[row_index],
+      CT_Threshold_C = threshold_from_note(factors$Note[row_index]),
+      CT_Applied = ct_is_applicable(
+        factors$CT_15[row_index],
+        annual_temp,
+        factors$Note[row_index]
+      ),
+      EF_TotalN = round(ef_value, 3),
+      stringsAsFactors = FALSE
+    )
+
+    deterministic_detail_index <- deterministic_detail_index + 1
+  }
+}
+
+deterministic_detail <- do.call(rbind, deterministic_detail_rows)
+```
+
+## Monte Carlo Preparation
+
+```{r}
+#| label: monte-carlo-preparation
+#| message: false
+#| warning: false
+
+# Bounded lognormal sampling uses the reported lower and upper 95% CI limits
+# as bounds. Values outside the bounds are resampled.
+sample_bounded_lognormal <- function(n, center, lower, upper) {
+  if (is.na(center) || is.na(lower) || is.na(upper) ||
+      center <= 0 || lower <= 0 || upper <= 0 || lower >= upper) {
+    return(rep(center, n))
+  }
+
+  sdlog <- (log(upper) - log(lower)) / (2 * 1.96)
+  samples <- rep(NA_real_, n)
+  remaining <- seq_len(n)
+  attempts <- 0
+
+  while (length(remaining) > 0 && attempts < 100) {
+    draws <- rlnorm(length(remaining), meanlog = log(center), sdlog = sdlog)
+    keep <- draws >= lower & draws <= upper
+
+    if (any(keep)) {
+      samples[remaining[keep]] <- draws[keep]
+    }
+
+    remaining <- remaining[!keep]
+    attempts <- attempts + 1
+  }
+
+  # If rejection sampling leaves a few empty values, use the point estimate.
+  samples[is.na(samples)] <- center
+  samples
+}
+
+temperature_samples <- list()
+for (climate_col in climate_cols) {
+  annual_temp <- broad_climate_summary[
+    broad_climate_summary$Climate_zone == climate_col,
+    "Annual_Temperature_C"
+  ]
+  annual_sd <- broad_climate_summary[
+    broad_climate_summary$Climate_zone == climate_col,
+    "Annual_Temperature_SD_C"
+  ]
+
+  temperature_samples[[climate_col]] <- rnorm(
+    n_iter,
+    mean = annual_temp,
+    sd = annual_sd
+  )
+}
+```
+
+## Monte Carlo Simulation
+
+```{r}
+#| label: monte-carlo-simulation
+#| message: false
+#| warning: false
+
+mc_summary_rows <- list()
+mc_summary_index <- 1
+
+for (row_index in seq_len(nrow(factors))) {
+  ef_samples <- sample_bounded_lognormal(
+    n = n_iter,
+    center = factors$EFs_TotalN[row_index],
+    lower = factors$EFs_Lower[row_index],
+    upper = factors$EFs_Upper[row_index]
+  )
+
+  ct_samples <- sample_bounded_lognormal(
+    n = n_iter,
+    center = factors$CT_15[row_index],
+    lower = factors$CT_Lower[row_index],
+    upper = factors$CT_Upper[row_index]
+  )
+
+  threshold_c <- threshold_from_note(factors$Note[row_index])
+
+  for (climate_col in climate_cols) {
+    temp_samples <- temperature_samples[[climate_col]]
+
+    if (is.na(threshold_c)) {
+      ct_applied <- !is.na(ct_samples)
+    } else {
+      ct_applied <- !is.na(ct_samples) & temp_samples > threshold_c
+    }
+
+    ef_sim <- ifelse(
+      ct_applied,
+      ef_samples * ct_samples^(temp_samples - 15),
+      ef_samples
+    )
+    ef_sim <- cap_ef(ef_sim)
+
+    deterministic_ef <- proposed_result[row_index, climate_col]
+
+    mc_summary_rows[[mc_summary_index]] <- data.frame(
+      Animal_Type = factors$Animal_Type[row_index],
+      Housing = factors$Housing[row_index],
+      Manure_type = factors$Manure_type[row_index],
+      Climate_zone = climate_col,
+      Annual_Temperature_C = round(
+        broad_climate_summary[
+          broad_climate_summary$Climate_zone == climate_col,
+          "Annual_Temperature_C"
+        ],
+        3
+      ),
+      Annual_Temperature_SD_C = round(
+        broad_climate_summary[
+          broad_climate_summary$Climate_zone == climate_col,
+          "Annual_Temperature_SD_C"
+        ],
+        3
+      ),
+      EF_Deterministic = round(deterministic_ef, 3),
+      EF_MC_Mean = round(mean(ef_sim, na.rm = TRUE), 3),
+      EF_MC_Lower95 = round(as.numeric(quantile(ef_sim, 0.025, na.rm = TRUE)), 3),
+      EF_MC_Upper95 = round(as.numeric(quantile(ef_sim, 0.975, na.rm = TRUE)), 3),
+      CT_Threshold_C = threshold_c,
+      stringsAsFactors = FALSE
+    )
+
+    mc_summary_index <- mc_summary_index + 1
+  }
+}
+
+mc_summary <- do.call(rbind, mc_summary_rows)
+```
+
+## Monte Carlo Summary
+
+```{r}
+#| label: monte-carlo-summary
+#| message: false
+#| warning: false
+
+head(mc_summary)
+```
+
+## Validation
+
+```{r}
+#| label: validation
+#| message: false
+#| warning: false
+
+expected_output_cols <- c(id_cols, climate_cols)
+
+if (!identical(names(proposed_result), expected_output_cols)) {
+  stop("Proposed output columns changed unexpectedly.")
+}
+
+if (nrow(proposed_result) != nrow(factors)) {
+  stop("Proposed output row count does not match the Housing sheet.")
+}
+
+if (nrow(mc_summary) != nrow(factors) * length(climate_cols)) {
+  stop("Monte Carlo summary row count changed unexpectedly.")
+}
+
+if (any(is.na(proposed_result[climate_cols]))) {
+  stop("Proposed climate-zone EF columns should not contain missing values.")
+}
+
+if (max(as.matrix(proposed_result[climate_cols]), na.rm = TRUE) > ef_max) {
+  stop("Proposed output exceeds ef_max.")
+}
+
+mc_ef_cols <- c("EF_Deterministic", "EF_MC_Mean", "EF_MC_Lower95", "EF_MC_Upper95")
+if (max(as.matrix(mc_summary[mc_ef_cols]), na.rm = TRUE) > ef_max) {
+  stop("Monte Carlo summary exceeds ef_max.")
+}
+```
+
+## Write Outputs
+
+```{r}
+#| label: write-outputs
+#| message: false
+#| warning: false
+
+write.csv(
+  proposed_result,
+  paths$proposed_csv,
+  row.names = FALSE,
+  quote = TRUE,
+  na = ""
+)
+
+write.csv(
+  mc_summary,
+  paths$mc_summary_csv,
+  row.names = FALSE,
+  quote = TRUE,
+  na = ""
+)
+```
+
+## Summary
+
+```{r}
+#| label: summary
+#| message: false
+#| warning: false
+
+output_summary <- data.frame(
+  output_file = c(paths$proposed_csv, paths$mc_summary_csv),
+  rows = c(nrow(proposed_result), nrow(mc_summary)),
+  columns = c(ncol(proposed_result), ncol(mc_summary)),
+  stringsAsFactors = FALSE
+)
+
+output_summary
+```
+
+## Method Notes
+
+The final proposal uses annual temperature only. Monthly temperature medians
+are used only to construct annual broad-climate temperatures from the climate
+workbook.
+
+For the Monte Carlo simulation, monthly temperatures are not sampled
+independently. Instead, one annual temperature is sampled for each broad
+climate zone using the annual mean temperature and an annual-level standard
+deviation derived from the workbook's monthly `Std` values. This avoids
+unrealistic simulated years where adjacent months move in unrelated directions.
+
+The correction uses `EFs_TotalN` as the 15 degrees C reference EF. This follows
+the requested output method, but it is an assumption because `EFs_TotalN` is a
+global average and the source data do not identify the average observation
+temperature for that EF. The input column `EF_Ref_15` is retained in the input
+table but is not used in the main proposed output.

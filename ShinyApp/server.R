@@ -1,4 +1,4 @@
-﻿# Shared constants, data loading, calculation helpers, and Shiny server logic.
+# Shared constants, data loading, calculation helpers, and Shiny server logic.
 # Keep NH3 emission model changes here so UI layout stays separate.
 
 library(shiny)
@@ -130,10 +130,16 @@ num_or_na <- function(x) {
   suppressWarnings(as.numeric(x))
 }
 
-load_housing_factors <- function(path = "Reference/NH3_Correction_Factors.csv") {
+app_file <- function(...) {
+  local_path <- file.path(...)
+  parent_path <- file.path("..", ...)
+  if (file.exists(local_path)) local_path else parent_path
+}
+
+load_housing_factors <- function(path = "Inputs/NH3_Correction_Factors.csv") {
   # Housing correction factors are kept in CSV form so shinyapps.io can load
   # them without needing Excel-reading packages.
-  factors <- read.csv(path, stringsAsFactors = FALSE, na.strings = c(""))
+  factors <- read.csv(app_file(path), stringsAsFactors = FALSE, na.strings = c(""))
   names(factors) <- trimws(names(factors))
   factors$Animal_Type <- trimws(factors$Animal_Type)
   factors$Housing <- trimws(factors$Housing)
@@ -288,7 +294,8 @@ calculate_housing_scenario <- function(
   n_values,
   factor_row,
   ct_basis,
-  annual_temperature = NA_real_
+  annual_temperature = NA_real_,
+  annual_ref_temperature = housing_ref_annual_temp
 ) {
   # Housing uses Total N and Total-N EF values. There is no manure removal
   # mass flow here; each month is simply N input multiplied by corrected EF.
@@ -300,10 +307,10 @@ calculate_housing_scenario <- function(
   if (identical(temp_basis, "Annual")) {
     # Annual temperature uses the annual reference temperature and produces
     # one annual-style EF repeated across months for a consistent table shape.
-    ef_values <- factor_row$EFref_TotalN * (ct_value ^ (annual_temperature - housing_ref_annual_temp))
+    ef_values <- factor_row$EFref_TotalN * (ct_value ^ (annual_temperature - annual_ref_temperature))
     ef_values <- rep(ef_values, 12)
     temp_values <- rep(annual_temperature, 12)
-    ref_values <- rep(housing_ref_annual_temp, 12)
+    ref_values <- rep(annual_ref_temperature, 12)
   } else {
     # Monthly temperature uses month-specific reference temperatures from the
     # cool temperate moist baseline.
@@ -351,7 +358,7 @@ calculate_housing_scenario <- function(
     EFSource = factor_row$EF_Source,
     EFref_TotalN = factor_row$EFref_TotalN,
     Temperature_C = if (identical(temp_basis, "Annual")) annual_temperature else NA_real_,
-    ReferenceTemperature_C = if (identical(temp_basis, "Annual")) housing_ref_annual_temp else NA_real_,
+    ReferenceTemperature_C = if (identical(temp_basis, "Annual")) annual_ref_temperature else NA_real_,
     Corrected_EF_TotalN = annual_ef,
     TotalN = annual_n,
     NH3_emission = annual_nh3,
@@ -597,7 +604,7 @@ server <- function(input, output, session) {
   output$download_temperature_template <- downloadHandler(
     filename = function() "temperature_upload_template.csv",
     content = function(file) {
-      file.copy("temperature_upload_template.csv", file, overwrite = TRUE)
+      file.copy(app_file("temperature_upload_template.csv"), file, overwrite = TRUE)
     }
   )
 
@@ -635,7 +642,10 @@ server <- function(input, output, session) {
       }
 
       if (identical(input$housing_temp_mode, "annual")) {
-        validate(need(!is.na(input$housing_annual_temp), "Enter an annual housing temperature."))
+        validate(
+          need(!is.na(input$housing_annual_temp), "Enter an annual housing temperature."),
+          need(!is.na(input$housing_ref_annual_temp), "Enter an annual housing reference temperature.")
+        )
         primary <- calculate_housing_scenario(
           scenario = "Primary",
           temps = rep(input$housing_annual_temp, 12),
@@ -643,7 +653,8 @@ server <- function(input, output, session) {
           n_values = total_n_values,
           factor_row = factor_row,
           ct_basis = input$housing_ct_basis,
-          annual_temperature = input$housing_annual_temp
+          annual_temperature = input$housing_annual_temp,
+          annual_ref_temperature = input$housing_ref_annual_temp
         )
       } else {
         temps <- get_month_values(input, "housing_temp")

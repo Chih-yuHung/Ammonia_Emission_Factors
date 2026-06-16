@@ -9,7 +9,7 @@ This project contains a Shiny app for estimating NH<sub>3</sub> emissions from e
 
 The app has two calculation sections:
 
-- `Housing`: uses Total N and housing correction factors from `Reference/NH3_Correction_Factors.csv`.
+- `Housing`: uses Total N and housing correction factors from `Inputs/NH3_Correction_Factors.csv`.
 - `Storage`: uses TAN and the existing storage mass-flow model with storage/cover factors and optional removal assumptions.
 
 ## Housing Calculation

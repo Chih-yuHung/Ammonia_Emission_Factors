@@ -1,4 +1,4 @@
-﻿# Shiny UI layout only. Shared choices and helper functions are defined in server.R.
+# Shiny UI layout only. Shared choices and helper functions are defined in server.R.
 
 ui <- fluidPage(
   tags$head(
@@ -110,7 +110,8 @@ ui <- fluidPage(
           ),
           conditionalPanel(
             condition = "input.housing_temp_mode == 'annual'",
-            numericInput("housing_annual_temp", "Annual temperature (deg C)", value = NA_real_, width = "100%")
+            numericInput("housing_annual_temp", "Annual temperature (deg C)", value = NA_real_, width = "100%"),
+            numericInput("housing_ref_annual_temp", "Annual reference temperature (deg C)", value = housing_ref_annual_temp, width = "100%")
           ),
           conditionalPanel(
             condition = "input.housing_temp_mode == 'monthly'",
