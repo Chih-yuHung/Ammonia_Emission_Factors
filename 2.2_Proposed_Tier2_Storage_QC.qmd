@@ -1,0 +1,484 @@
+---
+title: "QC: Proposed Tier 2 Storage Monthly TAN and NH3"
+format:
+  html:
+    toc: true
+    toc-depth: 2
+---
+
+## Overview
+
+This QC file shows the month-by-month storage mass balance used for the
+proposed Tier 2 storage NH3 emission factor calculation.
+
+The QC scenarios are:
+
+- Dairy Cattle, Tank, Slurry
+- Dairy Cattle, Manure heap, Solid
+
+Both are evaluated for `Cool Temperate Moist` under all four removal schedules.
+
+## Preparation
+
+```{r}
+#| label: preparation
+#| message: false
+#| warning: false
+
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(readxl)
+library(readr)
+
+month_labels <- c(
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+)
+
+month_numbers <- seq_along(month_labels)
+names(month_numbers) <- month_labels
+
+# -------------------------------------------------------------------------
+# Editable QC parameters
+# -------------------------------------------------------------------------
+monthly_tan_kg <- 100
+simulation_years <- 3
+reference_temperature_c <- 15
+removal_efficiency <- 0.95
+ef_max <- 1
+qc_climate_zone <- "Cool Temperate Dry"
+
+qc_combinations <- data.frame(
+  Animal_Type = c("Dairy Cattle", "Dairy Cattle"),
+  Storage = c("Tank", "Manure heap"),
+  Manure_type = c("Slurry", "Solid"),
+  stringsAsFactors = FALSE
+)
+
+removal_schedules <- list(
+  April = month_numbers["Apr"],
+  October = month_numbers["Oct"],
+  April_October = c(month_numbers["Apr"], month_numbers["Oct"]),
+  April_August_November = c(
+    month_numbers["Apr"],
+    month_numbers["Aug"],
+    month_numbers["Nov"]
+  )
+)
+
+removal_schedule_order <- names(removal_schedules)
+
+paths <- list(
+  factors_xlsx = file.path("Inputs", "NH3_Correction_Factors.xlsx"),
+  climate_xlsx = file.path("Inputs", "Climate_zone_temperatures.xlsx"),
+  output_csv = file.path("Outputs", "Proposed_Tier2_Storage_QC_Monthly.csv"),
+  figure_dir = file.path("Outputs", "Storage_QC_Figures")
+)
+
+dir.create("Outputs", showWarnings = FALSE, recursive = TRUE)
+dir.create(paths$figure_dir, showWarnings = FALSE, recursive = TRUE)
+
+total_months <- simulation_years * length(month_labels)
+```
+
+## Read Inputs
+
+```{r}
+#| label: read-inputs
+#| message: false
+#| warning: false
+
+factors <- as.data.frame(
+  readxl::read_excel(paths$factors_xlsx, sheet = "Storage"),
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+names(factors) <- trimws(names(factors))
+
+text_cols <- c("Animal_Type", "Storage", "Manure_type", "Note")
+for (col in intersect(text_cols, names(factors))) {
+  factors[[col]] <- trimws(as.character(factors[[col]]))
+}
+factors$Note[is.na(factors$Note) | factors$Note == "NA"] <- ""
+
+numeric_cols <- c("EFs_TAN", "CT_wet", "CT_dry")
+for (col in numeric_cols) {
+  factors[[col]] <- suppressWarnings(as.numeric(factors[[col]]))
+}
+
+qc_factors <- inner_join(
+  qc_combinations,
+  factors,
+  by = c("Animal_Type", "Storage", "Manure_type")
+)
+
+if (nrow(qc_factors) != nrow(qc_combinations)) {
+  stop("Could not match all requested QC storage combinations.")
+}
+
+climate_raw <- readxl::read_excel(
+  paths$climate_xlsx,
+  sheet = "Sheet2",
+  col_names = FALSE,
+  .name_repair = "minimal"
+)
+
+month_median_cols <- 2 + (seq_along(month_labels) - 1) * 2
+
+climate_medians <- as.data.frame(
+  climate_raw[-c(1, 2), c(1, month_median_cols)],
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+names(climate_medians) <- c("Climate_zone", month_labels)
+climate_medians$Climate_zone <- trimws(as.character(climate_medians$Climate_zone))
+
+for (month in month_labels) {
+  climate_medians[[month]] <- suppressWarnings(as.numeric(climate_medians[[month]]))
+}
+
+qc_temperature <- climate_medians %>%
+  filter(Climate_zone == qc_climate_zone)
+
+if (nrow(qc_temperature) != 1) {
+  stop("Could not find climate zone: ", qc_climate_zone)
+}
+
+qc_temperature
+qc_factors
+```
+
+## Calculation Functions
+
+```{r}
+#| label: calculation-functions
+#| message: false
+#| warning: false
+
+cap_ef <- function(ef_value) {
+  pmin(ef_value, ef_max)
+}
+
+ct_basis_for_climate <- function(climate_zone) {
+  if (grepl("Dry$", climate_zone)) {
+    return("dry")
+  }
+
+  "wet"
+}
+
+calculate_monthly_ef <- function(ef_ref, ct, temperatures_c) {
+  if (is.na(ct)) {
+    return(cap_ef(rep(ef_ref, length(temperatures_c))))
+  }
+
+  cap_ef(ef_ref * ct^(temperatures_c - reference_temperature_c))
+}
+
+simulate_storage_monthly <- function(
+  factor_row,
+  removal_schedule_name,
+  removal_months,
+  temperatures_c
+) {
+  ct_basis <- ct_basis_for_climate(qc_climate_zone)
+  ct_value <- if (identical(ct_basis, "dry")) factor_row$CT_dry else factor_row$CT_wet
+
+  monthly_ef <- calculate_monthly_ef(
+    ef_ref = factor_row$EFs_TAN,
+    ct = ct_value,
+    temperatures_c = temperatures_c
+  )
+
+  stored_tan <- 0
+  cumulative_nh3 <- 0
+  rows <- vector("list", total_months)
+
+  for (period_index in seq_len(total_months)) {
+    month_index <- ((period_index - 1) %% length(month_labels)) + 1
+    year_index <- ((period_index - 1) %/% length(month_labels)) + 1
+
+    tan_start <- stored_tan
+    tan_removed <- if (month_index %in% removal_months) {
+      tan_start * removal_efficiency
+    } else {
+      0
+    }
+
+    tan_after_removal <- tan_start - tan_removed
+    available_tan <- tan_after_removal + monthly_tan_kg
+    ef_this_month <- monthly_ef[month_index]
+    nh3_loss <- min(available_tan, available_tan * ef_this_month)
+    monthly_ef_tan_stored <- ifelse(
+      available_tan > 0,
+      nh3_loss / available_tan,
+      NA_real_
+    )
+    stored_tan <- available_tan - nh3_loss
+    cumulative_nh3 <- cumulative_nh3 + nh3_loss
+
+    rows[[period_index]] <- data.frame(
+      Animal_Type = factor_row$Animal_Type,
+      Storage = factor_row$Storage,
+      Manure_type = factor_row$Manure_type,
+      Combination = paste(factor_row$Animal_Type, factor_row$Storage, factor_row$Manure_type, sep = " | "),
+      Climate_zone = qc_climate_zone,
+      Removal_Schedule = removal_schedule_name,
+      Removal_Months = paste(month_labels[removal_months], collapse = ";"),
+      Year = year_index,
+      Month = month_labels[month_index],
+      Month_Index = month_index,
+      Period = period_index,
+      Temperature_C = temperatures_c[month_index],
+      CT_Basis = ifelse(identical(ct_basis, "dry"), "Dry", "Wet"),
+      CT = ct_value,
+      EFs_TAN = factor_row$EFs_TAN,
+      Corrected_EF_TAN = ef_this_month,
+      TAN_Start_Stored_kg = tan_start,
+      TAN_Removed_kg = tan_removed,
+      TAN_After_Removal_kg = tan_after_removal,
+      TAN_Input_kg = monthly_tan_kg,
+      TAN_Available_kg = available_tan,
+      NH3_N_kg = nh3_loss,
+      Monthly_EF_TAN_Stored = monthly_ef_tan_stored,
+      Cumulative_NH3_N_kg = cumulative_nh3,
+      TAN_End_Stored_kg = stored_tan,
+      stringsAsFactors = FALSE
+    )
+  }
+
+  do.call(rbind, rows)
+}
+```
+
+## Monthly QC Data
+
+```{r}
+#| label: monthly-qc-data
+#| message: false
+#| warning: false
+
+temperatures_c <- as.numeric(qc_temperature[month_labels])
+
+qc_rows <- list()
+qc_index <- 1
+
+for (row_index in seq_len(nrow(qc_factors))) {
+  factor_row <- qc_factors[row_index, ]
+
+  for (schedule_name in names(removal_schedules)) {
+    qc_rows[[qc_index]] <- simulate_storage_monthly(
+      factor_row = factor_row,
+      removal_schedule_name = schedule_name,
+      removal_months = removal_schedules[[schedule_name]],
+      temperatures_c = temperatures_c
+    )
+    qc_index <- qc_index + 1
+  }
+}
+
+qc_monthly <- do.call(rbind, qc_rows) %>%
+  mutate(
+    Removal_Schedule = factor(Removal_Schedule, levels = removal_schedule_order),
+    Period_Label = paste0("Y", Year, "-", Month)
+  )
+
+write.csv(
+  qc_monthly,
+  paths$output_csv,
+  row.names = FALSE,
+  quote = TRUE,
+  na = ""
+)
+
+dairy_tank_slurry_monthly <- qc_monthly %>%
+  filter(
+    Animal_Type == "Dairy Cattle",
+    Storage == "Tank",
+    Manure_type == "Slurry"
+  )
+
+qc_monthly %>%
+  select(
+    Combination,
+    Removal_Schedule,
+    Year,
+    Month,
+    Temperature_C,
+    Corrected_EF_TAN,
+    TAN_Start_Stored_kg,
+    TAN_Removed_kg,
+    TAN_Input_kg,
+    TAN_Available_kg,
+    NH3_N_kg,
+    Monthly_EF_TAN_Stored,
+    Cumulative_NH3_N_kg,
+    TAN_End_Stored_kg
+  ) %>%
+  mutate(
+    across(
+      c(
+        Temperature_C,
+        Corrected_EF_TAN,
+        TAN_Start_Stored_kg,
+        TAN_Removed_kg,
+        TAN_Available_kg,
+        NH3_N_kg,
+        Monthly_EF_TAN_Stored,
+        Cumulative_NH3_N_kg,
+        TAN_End_Stored_kg
+      ),
+      ~ round(.x, 3)
+    )
+  ) %>%
+  knitr::kable()
+```
+
+## Monthly TAN In Storage
+
+```{r}
+#| label: fig-monthly-tan-storage
+#| fig-width: 11
+#| fig-height: 6.5
+
+fig_tan_storage <- ggplot(
+  qc_monthly,
+  aes(x = Period, y = TAN_End_Stored_kg, color = Removal_Schedule)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.4) +
+  facet_wrap(~ Combination, ncol = 1, scales = "free_y") +
+  scale_x_continuous(
+    breaks = seq(1, total_months, by = 3),
+    labels = qc_monthly$Period_Label[seq(1, total_months, by = 3)]
+  ) +
+  labs(
+    title = "Monthly TAN remaining in storage",
+    subtitle = paste(qc_climate_zone, "| removal efficiency =", scales::percent(removal_efficiency)),
+    x = "Simulation month",
+    y = "End-of-month stored TAN, kg",
+    color = "Removal schedule"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  )
+
+fig_tan_storage
+
+ggsave(
+  file.path(paths$figure_dir, "storage_qc_monthly_tan_in_storage.png"),
+  fig_tan_storage,
+  width = 11,
+  height = 6.5,
+  dpi = 300,
+  bg = "white"
+)
+```
+
+## Cumulative NH3-N Over Three Years
+
+```{r}
+#| label: fig-cumulative-nh3
+#| fig-width: 11
+#| fig-height: 6.5
+
+fig_cumulative_nh3 <- ggplot(
+  qc_monthly,
+  aes(x = Period, y = Cumulative_NH3_N_kg, color = Removal_Schedule)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.4) +
+  facet_wrap(~ Combination, ncol = 1, scales = "free_y") +
+  scale_x_continuous(
+    breaks = seq(1, total_months, by = 3),
+    labels = qc_monthly$Period_Label[seq(1, total_months, by = 3)]
+  ) +
+  labs(
+    title = "Cumulative NH3-N volatilization over three years",
+    subtitle = paste(qc_climate_zone, "| monthly TAN input =", monthly_tan_kg, "kg"),
+    x = "Simulation month",
+    y = "Cumulative NH3-N, kg",
+    color = "Removal schedule"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  )
+
+fig_cumulative_nh3
+
+ggsave(
+  file.path(paths$figure_dir, "storage_qc_cumulative_nh3.png"),
+  fig_cumulative_nh3,
+  width = 11,
+  height = 6.5,
+  dpi = 300,
+  bg = "white"
+)
+```
+
+## Year 3 Summary
+
+```{r}
+#| label: year-3-summary
+
+year3_summary <- qc_monthly %>%
+  filter(Year == simulation_years) %>%
+  group_by(Combination, Removal_Schedule, Climate_zone) %>%
+  summarize(
+    Year3_TAN_Input_kg = sum(TAN_Input_kg),
+    Year3_TAN_Available_kg = sum(TAN_Available_kg),
+    Year3_NH3_N_kg = sum(NH3_N_kg),
+    Year3_EF_TAN = weighted.mean(
+      Monthly_EF_TAN_Stored,
+      TAN_Available_kg,
+      na.rm = TRUE
+    ),
+    Year3_Unweighted_Monthly_EF_TAN = mean(
+      Monthly_EF_TAN_Stored,
+      na.rm = TRUE
+    ),
+    Year3_Mass_Balance_EF_TAN = Year3_NH3_N_kg / Year3_TAN_Input_kg,
+    Final_Stored_TAN_kg = dplyr::last(TAN_End_Stored_kg),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Year3_NH3_N_kg = round(Year3_NH3_N_kg, 3),
+    Year3_EF_TAN = round(Year3_EF_TAN, 3),
+    Year3_Unweighted_Monthly_EF_TAN = round(
+      Year3_Unweighted_Monthly_EF_TAN,
+      3
+    ),
+    Year3_Mass_Balance_EF_TAN = round(Year3_Mass_Balance_EF_TAN, 3),
+    Final_Stored_TAN_kg = round(Final_Stored_TAN_kg, 3)
+  )
+
+knitr::kable(year3_summary)
+```
+
+## Output Files
+
+```{r}
+#| label: output-files
+
+output_files <- data.frame(
+  File = c(
+    paths$output_csv,
+    file.path(paths$figure_dir, "storage_qc_monthly_tan_in_storage.png"),
+    file.path(paths$figure_dir, "storage_qc_cumulative_nh3.png")
+  ),
+  stringsAsFactors = FALSE
+)
+
+knitr::kable(output_files)
+```

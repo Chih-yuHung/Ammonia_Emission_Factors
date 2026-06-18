@@ -1,0 +1,300 @@
+---
+title: "DATAMAN-AMCLM Implied Temperature Check"
+format: html
+---
+
+## Overview
+
+This file back-calculates the temperature implied by each DATAMAN/global
+reference housing EF (`EFs_TotalN`) when compared with the modelled AMCLIM
+reference EF at 15 degrees C (`EF_Ref_15`) and the temperature correction
+factor (`CT_15`).
+
+The calculation rearranges the exponential equation:
+
+```text
+EFs_TotalN = EF_Ref_15 * CT_15^(T_implied - 15)
+T_implied = 15 + log(EFs_TotalN / EF_Ref_15) / log(CT_15)
+```
+
+This is a diagnostic back-calculation, not a new EF estimate.
+
+## Preparation
+
+```{r}
+#| label: preparation
+#| message: false
+#| warning: false
+
+library(readxl)
+
+# Project file paths.
+paths <- list(
+  factors_xlsx = file.path("Inputs", "NH3_Correction_Factors.xlsx"),
+  output_csv = file.path("Outputs", "DATAMAN_AMCLM_Implied_Temperature.csv")
+)
+
+# Temperature flags used to screen implied temperatures.
+very_low_temperature_c <- 5
+very_high_temperature_c <- 30
+
+id_cols <- c("Animal_Type", "Housing", "Manure_type")
+required_cols <- c(id_cols, "EFs_TotalN", "EF_Ref_15", "CT_15", "Note")
+```
+
+## Input Data
+
+```{r}
+#| label: input-data
+#| message: false
+#| warning: false
+
+# Read the updated housing EF and CT table.
+factors <- as.data.frame(
+  readxl::read_excel(paths$factors_xlsx, sheet = "Housing"),
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+names(factors) <- trimws(names(factors))
+
+missing_cols <- setdiff(required_cols, names(factors))
+if (length(missing_cols) > 0) {
+  stop("Missing required input columns: ", paste(missing_cols, collapse = ", "))
+}
+
+# Keep text values stable for output.
+for (col in c(id_cols, "Note")) {
+  factors[[col]] <- trimws(as.character(factors[[col]]))
+}
+factors$Note[is.na(factors$Note) | factors$Note == "NA"] <- ""
+
+# Convert the values needed by the inverse equation to numeric vectors.
+for (col in c("EFs_TotalN", "EF_Ref_15", "CT_15")) {
+  factors[[col]] <- suppressWarnings(as.numeric(factors[[col]]))
+}
+```
+
+## Calculation
+
+```{r}
+#| label: calculation
+#| message: false
+#| warning: false
+
+# Notes such as "Only applicable to T >15" define the minimum temperature
+# required before the CT relationship is expected to apply.
+threshold_from_note <- function(note) {
+  note <- as.character(note)
+  match_text <- regmatches(
+    note,
+    regexpr(">[[:space:]]*[-+]?[0-9]*\\.?[0-9]+", note)
+  )
+
+  if (length(match_text) == 0 || is.na(match_text) || match_text == "") {
+    return(NA_real_)
+  }
+
+  as.numeric(gsub(">|[[:space:]]", "", match_text))
+}
+
+can_calculate_implied_temperature <- function(ef_total_n, ef_ref_15, ct_15) {
+  !is.na(ef_total_n) &&
+    !is.na(ef_ref_15) &&
+    !is.na(ct_15) &&
+    ef_total_n > 0 &&
+    ef_ref_15 > 0 &&
+    ct_15 > 0 &&
+    ct_15 != 1
+}
+
+calculate_implied_temperature <- function(ef_total_n, ef_ref_15, ct_15) {
+  if (!can_calculate_implied_temperature(ef_total_n, ef_ref_15, ct_15)) {
+    return(NA_real_)
+  }
+
+  15 + log(ef_total_n / ef_ref_15) / log(ct_15)
+}
+
+implied_temperature <- vapply(
+  seq_len(nrow(factors)),
+  function(row_index) {
+    calculate_implied_temperature(
+      ef_total_n = factors$EFs_TotalN[row_index],
+      ef_ref_15 = factors$EF_Ref_15[row_index],
+      ct_15 = factors$CT_15[row_index]
+    )
+  },
+  numeric(1)
+)
+
+ct_threshold <- vapply(factors$Note, threshold_from_note, numeric(1))
+```
+
+## Threshold Flagging
+
+```{r}
+#| label: threshold-flagging
+#| message: false
+#| warning: false
+
+build_temperature_flag <- function(
+  implied_temp,
+  threshold_c,
+  ef_total_n,
+  ef_ref_15,
+  ct_15
+) {
+  if (!can_calculate_implied_temperature(ef_total_n, ef_ref_15, ct_15)) {
+    return("Cannot calculate")
+  }
+
+  flags <- character(0)
+
+  if (!is.na(threshold_c) && implied_temp <= threshold_c) {
+    flags <- c(flags, "Below CT threshold")
+  }
+
+  if (implied_temp < very_low_temperature_c) {
+    flags <- c(flags, "Very low implied temperature")
+  }
+
+  if (implied_temp > very_high_temperature_c) {
+    flags <- c(flags, "Very high implied temperature")
+  }
+
+  if (length(flags) == 0) {
+    return("OK")
+  }
+
+  paste(flags, collapse = "; ")
+}
+
+implied_temperature_flag <- vapply(
+  seq_len(nrow(factors)),
+  function(row_index) {
+    build_temperature_flag(
+      implied_temp = implied_temperature[row_index],
+      threshold_c = ct_threshold[row_index],
+      ef_total_n = factors$EFs_TotalN[row_index],
+      ef_ref_15 = factors$EF_Ref_15[row_index],
+      ct_15 = factors$CT_15[row_index]
+    )
+  },
+  character(1)
+)
+
+implied_temperature_output <- data.frame(
+  Animal_Type = factors$Animal_Type,
+  Housing = factors$Housing,
+  Manure_type = factors$Manure_type,
+  EFs_TotalN = factors$EFs_TotalN,
+  EF_Ref_15 = factors$EF_Ref_15,
+  CT_15 = factors$CT_15,
+  Implied_Temperature_C = round(implied_temperature, 3),
+  Implied_Temperature_Flag = implied_temperature_flag,
+  Note = factors$Note,
+  stringsAsFactors = FALSE
+)
+```
+
+## Diagnostics
+
+```{r}
+#| label: diagnostics
+#| message: false
+#| warning: false
+
+valid_temperatures <- implied_temperature[is.finite(implied_temperature)]
+
+diagnostic_summary <- data.frame(
+  Metric = c(
+    "Rows",
+    "Minimum implied temperature C",
+    "Median implied temperature C",
+    "Maximum implied temperature C",
+    "Rows below 5 C",
+    "Rows above 30 C",
+    "Rows below CT applicability threshold"
+  ),
+  Value = c(
+    nrow(implied_temperature_output),
+    round(min(valid_temperatures), 3),
+    round(median(valid_temperatures), 3),
+    round(max(valid_temperatures), 3),
+    sum(valid_temperatures < very_low_temperature_c),
+    sum(valid_temperatures > very_high_temperature_c),
+    sum(!is.na(ct_threshold) & implied_temperature <= ct_threshold, na.rm = TRUE)
+  ),
+  stringsAsFactors = FALSE
+)
+
+diagnostic_summary
+```
+
+## Validation
+
+```{r}
+#| label: validation
+#| message: false
+#| warning: false
+
+if (nrow(implied_temperature_output) != nrow(factors)) {
+  stop("Output row count does not match the Housing sheet.")
+}
+
+if (any(is.na(implied_temperature_output$Implied_Temperature_C) &
+        implied_temperature_output$Implied_Temperature_Flag != "Cannot calculate")) {
+  stop("Missing implied temperatures must be flagged as Cannot calculate.")
+}
+
+if (any(grepl("Below CT threshold", implied_temperature_output$Implied_Temperature_Flag)) &&
+    !any(!is.na(ct_threshold))) {
+  stop("Threshold flags were assigned even though no thresholds were found.")
+}
+
+if (!any(grepl("Very low implied temperature", implied_temperature_output$Implied_Temperature_Flag))) {
+  warning("No rows were flagged as very low implied temperature.")
+}
+
+if (!any(grepl("Very high implied temperature", implied_temperature_output$Implied_Temperature_Flag))) {
+  warning("No rows were flagged as very high implied temperature.")
+}
+```
+
+## Write Outputs
+
+```{r}
+#| label: write-outputs
+#| message: false
+#| warning: false
+
+dir.create(dirname(paths$output_csv), showWarnings = FALSE, recursive = TRUE)
+
+write.csv(
+  implied_temperature_output,
+  paths$output_csv,
+  row.names = FALSE,
+  quote = TRUE,
+  na = ""
+)
+```
+
+## Summary
+
+```{r}
+#| label: summary
+#| message: false
+#| warning: false
+
+head(implied_temperature_output)
+diagnostic_summary
+```
+
+## Interpretation Note
+
+Very low or very high implied temperatures suggest that `EFs_TotalN`,
+`EF_Ref_15`, and `CT_15` may not share the same reference basis for that row.
+For rows with CT threshold notes, implied temperatures below the threshold also
+suggest that the exponential CT relationship may not be applicable to the
+back-calculated value.

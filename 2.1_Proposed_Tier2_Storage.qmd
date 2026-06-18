@@ -1,0 +1,730 @@
+---
+title: "Proposed Tier 2 Storage NH3 Emission Factors"
+format: html
+---
+
+## Overview
+
+This file calculates proposed Tier 2 manure storage ammonia emission factors by
+animal type, storage type, manure type, removal schedule, and climate zone.
+
+Storage uses a TAN mass-balance approach. Each month a fixed amount of TAN
+enters storage, temperature-corrected NH3 loss is calculated from available TAN,
+and remaining TAN is carried forward. The reported annual EF is calculated from
+the third simulation year.
+
+## Preparation
+
+```{r}
+#| label: preparation
+#| message: false
+#| warning: false
+
+library(readxl)
+
+# Month order used in the climate workbook and storage simulation.
+month_labels <- c(
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+)
+
+month_numbers <- seq_along(month_labels)
+names(month_numbers) <- month_labels
+
+# -------------------------------------------------------------------------
+# Editable model parameters
+# -------------------------------------------------------------------------
+seed <- 2026
+n_iter <- 5000
+monthly_tan_kg <- 100
+simulation_years <- 3
+reference_temperature_c <- 15
+removal_efficiency_mean <- 0.95
+removal_efficiency_sd <- 0.03
+ef_max <- 1
+
+removal_schedules <- list(
+  April = month_numbers["Apr"],
+  October = month_numbers["Oct"],
+  April_October = c(month_numbers["Apr"], month_numbers["Oct"]),
+  April_August_November = c(
+    month_numbers["Apr"],
+    month_numbers["Aug"],
+    month_numbers["Nov"]
+  )
+)
+
+paths <- list(
+  factors_xlsx = file.path("Inputs", "NH3_Correction_Factors.xlsx"),
+  climate_xlsx = file.path("Inputs", "Climate_zone_temperatures.xlsx"),
+  proposed_csv = file.path("Outputs", "Proposed_Tier2_Storage.csv"),
+  mc_summary_csv = file.path("Outputs", "Proposed_Tier2_Storage_MC_Summary.csv"),
+  mc_temperatures_csv = file.path(
+    "Outputs",
+    "Proposed_Tier2_Storage_MC_Temperatures.csv"
+  )
+)
+
+set.seed(seed)
+
+id_cols <- c("Animal_Type", "Storage", "Manure_type")
+total_months <- simulation_years * length(month_labels)
+year3_tan_input_kg <- length(month_labels) * monthly_tan_kg
+
+dir.create("Outputs", showWarnings = FALSE, recursive = TRUE)
+```
+
+## Input Data
+
+```{r}
+#| label: input-data
+#| message: false
+#| warning: false
+
+factors <- as.data.frame(
+  readxl::read_excel(paths$factors_xlsx, sheet = "Storage"),
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+names(factors) <- trimws(names(factors))
+
+required_factor_cols <- c(
+  id_cols,
+  "EFs_TAN", "EFs_Lower", "EFs_Upper",
+  "CT_wet", "CT_wet_Lower", "CT_wet_Upper",
+  "CT_dry", "CT_dry_Lower", "CT_dry_Upper",
+  "Note"
+)
+
+missing_factor_cols <- setdiff(required_factor_cols, names(factors))
+if (length(missing_factor_cols) > 0) {
+  stop("Missing Storage-sheet columns: ", paste(missing_factor_cols, collapse = ", "))
+}
+
+for (col in c(id_cols, "Note")) {
+  factors[[col]] <- trimws(as.character(factors[[col]]))
+}
+factors$Note[is.na(factors$Note) | factors$Note == "NA"] <- ""
+
+numeric_factor_cols <- setdiff(required_factor_cols, c(id_cols, "Note"))
+for (col in numeric_factor_cols) {
+  factors[[col]] <- suppressWarnings(as.numeric(factors[[col]]))
+}
+
+# Sheet2 has two header rows: month names in row 1 and Median/Std in row 2.
+climate_raw <- readxl::read_excel(
+  paths$climate_xlsx,
+  sheet = "Sheet2",
+  col_names = FALSE,
+  .name_repair = "minimal"
+)
+
+month_median_cols <- 2 + (seq_along(month_labels) - 1) * 2
+month_std_cols <- 3 + (seq_along(month_labels) - 1) * 2
+
+climate_medians <- as.data.frame(
+  climate_raw[-c(1, 2), c(1, month_median_cols)],
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+climate_stds <- as.data.frame(
+  climate_raw[-c(1, 2), c(1, month_std_cols)],
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+names(climate_medians) <- c("Climate_zone", month_labels)
+names(climate_stds) <- c("Climate_zone", month_labels)
+
+clean_climate_table <- function(climate_table) {
+  climate_table$Climate_zone <- trimws(as.character(climate_table$Climate_zone))
+  climate_table <- climate_table[
+    !is.na(climate_table$Climate_zone) &
+      nzchar(climate_table$Climate_zone) &
+      climate_table$Climate_zone != "0" &
+      climate_table$Climate_zone != "Polar",
+    ,
+    drop = FALSE
+  ]
+
+  for (month in month_labels) {
+    climate_table[[month]] <- suppressWarnings(as.numeric(climate_table[[month]]))
+  }
+
+  row.names(climate_table) <- NULL
+  climate_table
+}
+
+climate_medians <- clean_climate_table(climate_medians)
+climate_stds <- clean_climate_table(climate_stds)
+
+climate_zones <- climate_medians$Climate_zone
+
+if (!identical(climate_zones, climate_stds$Climate_zone)) {
+  stop("Climate median and Std tables have different climate-zone rows.")
+}
+
+if (length(climate_zones) != 9) {
+  stop("Expected 9 non-polar climate zones; found ", length(climate_zones), ".")
+}
+
+factors
+climate_medians
+```
+
+## Calculation Functions
+
+```{r}
+#| label: calculation-functions
+#| message: false
+#| warning: false
+
+cap_ef <- function(ef_value) {
+  pmin(ef_value, ef_max)
+}
+
+ct_basis_for_climate <- function(climate_zone) {
+  if (grepl("Dry$", climate_zone)) {
+    return("dry")
+  }
+
+  "wet"
+}
+
+ct_columns_for_basis <- function(ct_basis) {
+  if (identical(ct_basis, "dry")) {
+    return(c(center = "CT_dry", lower = "CT_dry_Lower", upper = "CT_dry_Upper"))
+  }
+
+  c(center = "CT_wet", lower = "CT_wet_Lower", upper = "CT_wet_Upper")
+}
+
+calculate_monthly_ef <- function(ef_ref, ct, temperatures_c) {
+  if (is.na(ct)) {
+    return(cap_ef(rep(ef_ref, length(temperatures_c))))
+  }
+
+  cap_ef(ef_ref * ct^(temperatures_c - reference_temperature_c))
+}
+
+simulate_storage_annual_ef <- function(
+  ef_matrix,
+  removal_months,
+  removal_efficiency
+) {
+  if (!is.matrix(ef_matrix)) {
+    ef_matrix <- matrix(ef_matrix, nrow = 1)
+  }
+
+  n_sim <- nrow(ef_matrix)
+
+  if (length(removal_efficiency) == 1) {
+    removal_efficiency <- rep(removal_efficiency, n_sim)
+  }
+
+  stored_tan <- rep(0, n_sim)
+  year3_nh3 <- rep(0, n_sim)
+  year3_tan <- rep(0, n_sim)
+  year3_weighted_ef_sum <- rep(0, n_sim)
+  year3_available_tan_sum <- rep(0, n_sim)
+  year3_unweighted_monthly_ef_sum <- rep(0, n_sim)
+  year3_month_count <- 0
+  minimum_stored_tan <- rep(Inf, n_sim)
+
+  for (period_index in seq_len(total_months)) {
+    month_index <- ((period_index - 1) %% length(month_labels)) + 1
+    year_index <- ((period_index - 1) %/% length(month_labels)) + 1
+
+    if (month_index %in% removal_months) {
+      # removal_efficiency is the fraction removed from storage; the balance remains.
+      stored_tan <- stored_tan * (1 - removal_efficiency)
+    }
+
+    available_tan <- stored_tan + monthly_tan_kg
+    nh3_loss <- pmin(available_tan, available_tan * ef_matrix[, period_index])
+    monthly_storage_ef <- ifelse(
+      available_tan > 0,
+      nh3_loss / available_tan,
+      NA_real_
+    )
+    stored_tan <- available_tan - nh3_loss
+    minimum_stored_tan <- pmin(minimum_stored_tan, stored_tan)
+
+    if (year_index == simulation_years) {
+      year3_nh3 <- year3_nh3 + nh3_loss
+      year3_tan <- year3_tan + monthly_tan_kg
+      year3_weighted_ef_sum <- year3_weighted_ef_sum +
+        monthly_storage_ef * available_tan
+      year3_available_tan_sum <- year3_available_tan_sum + available_tan
+      year3_unweighted_monthly_ef_sum <- year3_unweighted_monthly_ef_sum +
+        monthly_storage_ef
+      year3_month_count <- year3_month_count + 1
+    }
+  }
+
+  list(
+    annual_ef = year3_weighted_ef_sum / year3_available_tan_sum,
+    year3_unweighted_monthly_ef =
+      year3_unweighted_monthly_ef_sum / year3_month_count,
+    year3_mass_balance_ef = year3_nh3 / year3_tan,
+    year3_nh3 = year3_nh3,
+    year3_tan = year3_tan,
+    year3_available_tan = year3_available_tan_sum,
+    final_stored_tan = stored_tan,
+    minimum_stored_tan = minimum_stored_tan
+  )
+}
+
+sample_bounded_lognormal <- function(n, center, lower, upper) {
+  if (is.na(center) || is.na(lower) || is.na(upper) ||
+      center <= 0 || lower <= 0 || upper <= 0 || lower >= upper) {
+    return(rep(center, n))
+  }
+
+  sdlog <- (log(upper) - log(lower)) / (2 * 1.96)
+  samples <- rep(NA_real_, n)
+  remaining <- seq_len(n)
+  attempts <- 0
+
+  while (length(remaining) > 0 && attempts < 100) {
+    draws <- rlnorm(length(remaining), meanlog = log(center), sdlog = sdlog)
+    keep <- draws >= lower & draws <= upper
+
+    if (any(keep)) {
+      samples[remaining[keep]] <- draws[keep]
+    }
+
+    remaining <- remaining[!keep]
+    attempts <- attempts + 1
+  }
+
+  samples[is.na(samples)] <- center
+  samples
+}
+
+sample_truncated_normal <- function(n, mean, sd, lower = 0, upper = 1) {
+  if (is.na(sd) || sd <= 0) {
+    return(rep(min(max(mean, lower), upper), n))
+  }
+
+  samples <- rep(NA_real_, n)
+  remaining <- seq_len(n)
+  attempts <- 0
+
+  while (length(remaining) > 0 && attempts < 100) {
+    draws <- rnorm(length(remaining), mean = mean, sd = sd)
+    keep <- draws >= lower & draws <= upper
+
+    if (any(keep)) {
+      samples[remaining[keep]] <- draws[keep]
+    }
+
+    remaining <- remaining[!keep]
+    attempts <- attempts + 1
+  }
+
+  samples[is.na(samples)] <- min(max(mean, lower), upper)
+  samples
+}
+```
+
+## Deterministic Storage EF
+
+```{r}
+#| label: deterministic-storage-ef
+#| message: false
+#| warning: false
+
+deterministic_rows <- list()
+deterministic_index <- 1
+
+for (row_index in seq_len(nrow(factors))) {
+  for (schedule_name in names(removal_schedules)) {
+    removal_months <- removal_schedules[[schedule_name]]
+    removal_month_names <- paste(month_labels[removal_months], collapse = ";")
+
+    for (climate_zone in climate_zones) {
+      ct_basis <- ct_basis_for_climate(climate_zone)
+      ct_cols <- ct_columns_for_basis(ct_basis)
+      temperatures <- as.numeric(
+        climate_medians[climate_medians$Climate_zone == climate_zone, month_labels]
+      )
+
+      monthly_ef <- calculate_monthly_ef(
+        ef_ref = factors$EFs_TAN[row_index],
+        ct = factors[[ct_cols["center"]]][row_index],
+        temperatures_c = temperatures
+      )
+
+      ef_matrix <- matrix(rep(monthly_ef, simulation_years), nrow = 1)
+
+      simulated <- simulate_storage_annual_ef(
+        ef_matrix = ef_matrix,
+        removal_months = removal_months,
+        removal_efficiency = removal_efficiency_mean
+      )
+
+      deterministic_rows[[deterministic_index]] <- data.frame(
+        Animal_Type = factors$Animal_Type[row_index],
+        Storage = factors$Storage[row_index],
+        Manure_type = factors$Manure_type[row_index],
+        Removal_Schedule = schedule_name,
+        Removal_Months = removal_month_names,
+        Climate_zone = climate_zone,
+        CT_Basis = ifelse(ct_basis == "dry", "Dry", "Wet"),
+        CT = factors[[ct_cols["center"]]][row_index],
+        CT_Applied = !is.na(factors[[ct_cols["center"]]][row_index]),
+        EFs_TAN = factors$EFs_TAN[row_index],
+        Reference_Temperature_C = reference_temperature_c,
+        Monthly_TAN_kg = monthly_tan_kg,
+        Removal_Efficiency = removal_efficiency_mean,
+        Year3_TAN_Input_kg = simulated$year3_tan,
+        Year3_TAN_Available_kg = simulated$year3_available_tan,
+        Year3_NH3_N_kg = simulated$year3_nh3,
+        Year3_EF_TAN = round(simulated$annual_ef, 3),
+        Year3_Unweighted_Monthly_EF_TAN = round(
+          simulated$year3_unweighted_monthly_ef,
+          3
+        ),
+        Year3_Mass_Balance_EF_TAN = round(simulated$year3_mass_balance_ef, 3),
+        Final_Stored_TAN_kg = simulated$final_stored_tan,
+        Note = factors$Note[row_index],
+        stringsAsFactors = FALSE
+      )
+
+      deterministic_index <- deterministic_index + 1
+    }
+  }
+}
+
+proposed_result <- do.call(rbind, deterministic_rows)
+
+head(proposed_result)
+```
+
+## Monte Carlo Temperature Samples
+
+```{r}
+#| label: monte-carlo-temperature-samples
+#| message: false
+#| warning: false
+
+temperature_sample_rows <- vector(
+  "list",
+  length(climate_zones)
+)
+
+for (climate_index in seq_along(climate_zones)) {
+  climate_zone <- climate_zones[climate_index]
+  n_rows <- n_iter * simulation_years
+
+  climate_samples <- data.frame(
+    Iteration = rep(seq_len(n_iter), each = simulation_years),
+    Climate_zone = rep(climate_zone, n_rows),
+    Year = rep(seq_len(simulation_years), times = n_iter),
+    stringsAsFactors = FALSE
+  )
+
+  for (month in month_labels) {
+    month_median <- climate_medians[
+      climate_medians$Climate_zone == climate_zone,
+      month
+    ]
+    month_std <- climate_stds[
+      climate_stds$Climate_zone == climate_zone,
+      month
+    ]
+
+    climate_samples[[month]] <- rnorm(
+      n_rows,
+      mean = as.numeric(month_median),
+      sd = as.numeric(month_std)
+    )
+  }
+
+  temperature_sample_rows[[climate_index]] <- climate_samples
+}
+
+mc_temperatures <- do.call(rbind, temperature_sample_rows)
+row.names(mc_temperatures) <- NULL
+
+temperature_matrices <- list()
+for (climate_zone in climate_zones) {
+  climate_samples <- mc_temperatures[
+    mc_temperatures$Climate_zone == climate_zone,
+    ,
+    drop = FALSE
+  ]
+
+  temp_matrix <- matrix(NA_real_, nrow = n_iter, ncol = total_months)
+
+  for (year_index in seq_len(simulation_years)) {
+    year_samples <- climate_samples[
+      climate_samples$Year == year_index,
+      ,
+      drop = FALSE
+    ]
+    year_samples <- year_samples[order(year_samples$Iteration), ]
+
+    month_cols <- ((year_index - 1) * length(month_labels) + 1):
+      (year_index * length(month_labels))
+    temp_matrix[, month_cols] <- as.matrix(year_samples[month_labels])
+  }
+
+  temperature_matrices[[climate_zone]] <- temp_matrix
+}
+
+head(mc_temperatures)
+```
+
+## Monte Carlo Simulation
+
+```{r}
+#| label: monte-carlo-simulation
+#| message: false
+#| warning: false
+
+removal_efficiency_samples <- sample_truncated_normal(
+  n = n_iter,
+  mean = removal_efficiency_mean,
+  sd = removal_efficiency_sd,
+  lower = 0,
+  upper = 1
+)
+
+mc_summary_rows <- list()
+mc_summary_index <- 1
+
+for (row_index in seq_len(nrow(factors))) {
+  ef_samples <- sample_bounded_lognormal(
+    n = n_iter,
+    center = factors$EFs_TAN[row_index],
+    lower = factors$EFs_Lower[row_index],
+    upper = factors$EFs_Upper[row_index]
+  )
+
+  ct_samples_by_basis <- list()
+  for (ct_basis in c("wet", "dry")) {
+    ct_cols <- ct_columns_for_basis(ct_basis)
+    ct_samples_by_basis[[ct_basis]] <- sample_bounded_lognormal(
+      n = n_iter,
+      center = factors[[ct_cols["center"]]][row_index],
+      lower = factors[[ct_cols["lower"]]][row_index],
+      upper = factors[[ct_cols["upper"]]][row_index]
+    )
+  }
+
+  for (schedule_name in names(removal_schedules)) {
+    removal_months <- removal_schedules[[schedule_name]]
+    removal_month_names <- paste(month_labels[removal_months], collapse = ";")
+
+    for (climate_zone in climate_zones) {
+      ct_basis <- ct_basis_for_climate(climate_zone)
+      ct_cols <- ct_columns_for_basis(ct_basis)
+      ct_center <- factors[[ct_cols["center"]]][row_index]
+      temp_matrix <- temperature_matrices[[climate_zone]]
+
+      if (is.na(ct_center)) {
+        ef_matrix <- matrix(ef_samples, nrow = n_iter, ncol = total_months)
+      } else {
+        ct_samples <- ct_samples_by_basis[[ct_basis]]
+        ef_matrix <- ef_samples * ct_samples^(temp_matrix - reference_temperature_c)
+      }
+
+      ef_matrix <- cap_ef(ef_matrix)
+
+      simulated <- simulate_storage_annual_ef(
+        ef_matrix = ef_matrix,
+        removal_months = removal_months,
+        removal_efficiency = removal_efficiency_samples
+      )
+
+      deterministic_ef <- proposed_result[
+        proposed_result$Animal_Type == factors$Animal_Type[row_index] &
+          proposed_result$Storage == factors$Storage[row_index] &
+          proposed_result$Manure_type == factors$Manure_type[row_index] &
+          proposed_result$Removal_Schedule == schedule_name &
+          proposed_result$Climate_zone == climate_zone,
+        "Year3_EF_TAN"
+      ]
+
+      mc_summary_rows[[mc_summary_index]] <- data.frame(
+        Animal_Type = factors$Animal_Type[row_index],
+        Storage = factors$Storage[row_index],
+        Manure_type = factors$Manure_type[row_index],
+        Removal_Schedule = schedule_name,
+        Removal_Months = removal_month_names,
+        Climate_zone = climate_zone,
+        CT_Basis = ifelse(ct_basis == "dry", "Dry", "Wet"),
+        CT_Applied = !is.na(ct_center),
+        EFs_TAN = factors$EFs_TAN[row_index],
+        Reference_Temperature_C = reference_temperature_c,
+        Monthly_TAN_kg = monthly_tan_kg,
+        Removal_Efficiency_Mean = removal_efficiency_mean,
+        Removal_Efficiency_SD = removal_efficiency_sd,
+        Year3_TAN_Input_kg = year3_tan_input_kg,
+        TAN_Available_MC_Mean_kg = round(
+          mean(simulated$year3_available_tan, na.rm = TRUE),
+          3
+        ),
+        EF_Deterministic = deterministic_ef,
+        EF_MC_Mean = round(mean(simulated$annual_ef, na.rm = TRUE), 3),
+        EF_MC_Lower95 = round(
+          as.numeric(quantile(simulated$annual_ef, 0.025, na.rm = TRUE)),
+          3
+        ),
+        EF_MC_Upper95 = round(
+          as.numeric(quantile(simulated$annual_ef, 0.975, na.rm = TRUE)),
+          3
+        ),
+        Unweighted_Monthly_EF_MC_Mean = round(
+          mean(simulated$year3_unweighted_monthly_ef, na.rm = TRUE),
+          3
+        ),
+        Mass_Balance_EF_MC_Mean = round(
+          mean(simulated$year3_mass_balance_ef, na.rm = TRUE),
+          3
+        ),
+        NH3_N_MC_Mean_kg = round(mean(simulated$year3_nh3, na.rm = TRUE), 3),
+        Final_Stored_TAN_MC_Mean_kg = round(
+          mean(simulated$final_stored_tan, na.rm = TRUE),
+          3
+        ),
+        Note = factors$Note[row_index],
+        stringsAsFactors = FALSE
+      )
+
+      mc_summary_index <- mc_summary_index + 1
+    }
+  }
+}
+
+mc_summary <- do.call(rbind, mc_summary_rows)
+
+head(mc_summary)
+```
+
+## Validation
+
+```{r}
+#| label: validation
+#| message: false
+#| warning: false
+
+expected_result_rows <- nrow(factors) * length(removal_schedules) * length(climate_zones)
+expected_temperature_rows <- n_iter * length(climate_zones) * simulation_years
+
+if (nrow(proposed_result) != expected_result_rows) {
+  stop("Unexpected deterministic output rows: ", nrow(proposed_result))
+}
+
+if (nrow(mc_summary) != expected_result_rows) {
+  stop("Unexpected Monte Carlo summary rows: ", nrow(mc_summary))
+}
+
+if (nrow(mc_temperatures) != expected_temperature_rows) {
+  stop("Unexpected Monte Carlo temperature rows: ", nrow(mc_temperatures))
+}
+
+if ("Polar" %in% proposed_result$Climate_zone ||
+    "Polar" %in% mc_summary$Climate_zone ||
+    "Polar" %in% mc_temperatures$Climate_zone) {
+  stop("Polar climate zone should be excluded from storage outputs.")
+}
+
+if (any(!is.finite(proposed_result$Year3_EF_TAN))) {
+  stop("Deterministic storage EF contains non-finite values.")
+}
+
+if (any(proposed_result$Year3_EF_TAN < 0) ||
+    any(proposed_result$Year3_EF_TAN > ef_max)) {
+  stop("Deterministic storage EF is outside expected bounds.")
+}
+
+mc_ef_cols <- c("EF_MC_Mean", "EF_MC_Lower95", "EF_MC_Upper95")
+if (any(!is.finite(as.matrix(mc_summary[mc_ef_cols])))) {
+  stop("Monte Carlo summary contains non-finite EF values.")
+}
+
+if (any(as.matrix(mc_summary[mc_ef_cols]) < 0) ||
+    any(as.matrix(mc_summary[mc_ef_cols]) > ef_max)) {
+  stop("Monte Carlo summary EF is outside expected bounds.")
+}
+
+if (any(abs(proposed_result$Year3_TAN_Input_kg - year3_tan_input_kg) > 1e-9)) {
+  stop("Year 3 TAN denominator changed unexpectedly.")
+}
+
+if (any(proposed_result$Final_Stored_TAN_kg < -1e-9)) {
+  stop("Negative stored TAN detected in deterministic results.")
+}
+```
+
+## Write Outputs
+
+```{r}
+#| label: write-outputs
+#| message: false
+#| warning: false
+
+write.csv(
+  proposed_result,
+  paths$proposed_csv,
+  row.names = FALSE,
+  quote = TRUE,
+  na = ""
+)
+
+write.csv(
+  mc_summary,
+  paths$mc_summary_csv,
+  row.names = FALSE,
+  quote = TRUE,
+  na = ""
+)
+
+write.csv(
+  mc_temperatures,
+  paths$mc_temperatures_csv,
+  row.names = FALSE,
+  quote = TRUE,
+  na = ""
+)
+```
+
+## Summary
+
+```{r}
+#| label: summary
+#| message: false
+#| warning: false
+
+output_summary <- data.frame(
+  output_file = c(
+    paths$proposed_csv,
+    paths$mc_summary_csv,
+    paths$mc_temperatures_csv
+  ),
+  rows = c(nrow(proposed_result), nrow(mc_summary), nrow(mc_temperatures)),
+  columns = c(ncol(proposed_result), ncol(mc_summary), ncol(mc_temperatures)),
+  stringsAsFactors = FALSE
+)
+
+output_summary
+```
+
+## Method Notes
+
+The storage calculation uses `EFs_TAN` as the reference-temperature emission
+factor. The default reference temperature is 15 degrees C, but it is controlled
+by `reference_temperature_c` in the editable parameter block.
+
+Climate zones ending in `Dry` use dry CT values. Other non-polar climate zones
+use wet CT values. If the relevant CT value is missing, the calculation carries
+`EFs_TAN` forward without temperature correction and records `CT_Applied =
+FALSE`.
+
+The Monte Carlo temperature output is written in a reusable wide format with one
+row per iteration, climate zone, and simulation year, and one column for each
+month.

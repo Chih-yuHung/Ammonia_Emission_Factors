@@ -1,0 +1,435 @@
+---
+title: "Summary of Tier 2 NH3 Emission Factor Method"
+author: "Chih-Yu Hung"
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: true
+
+---
+
+## Overview
+
+This report summarizes the proposed Tier 2 ammonia (`NH3-N`) emission factor
+outputs for animal housing and manure storage. 
+
+Housing emission factors are reported on a Total N basis and storage emission
+factors are reported on a TAN basis. Figures therefore compare patterns and
+relative magnitudes, but the denominator differs between the two stages.
+
+
+
+## Preparation
+
+Read the results from housing and storage and MC results. 
+
+Note that we only have 4 board climate for housing, while 9 climate zones for storage. 
+
+There are 84 EFs for housing (21 animal/housing/manure combination x 4 climates) and 288 EFs for storage (8 animal/stroage/manure combination x 4 removal scenarios x 9 climates)
+
+```{r}
+#| label: preparation
+#| message: false
+#| warning: false
+
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(readr)
+library(tidyr)
+
+paths <- list(
+  housing_csv = file.path("Outputs", "Proposed_Tier2_Housing.csv"),
+  housing_mc_csv = file.path("Outputs", "Proposed_Tier2_Housing_MC_Summary.csv"),
+  storage_csv = file.path("Outputs", "Proposed_Tier2_Storage.csv"),
+  storage_mc_csv = file.path("Outputs", "Proposed_Tier2_Storage_MC_Summary.csv"),
+  figure_dir = file.path("Outputs", "Summary_Tier2_Method_Figures")
+)
+
+dir.create(paths$figure_dir, showWarnings = FALSE, recursive = TRUE)
+
+housing_climate_order <- c(
+  "Tropical",
+  "Warm_Temperate",
+  "Cool_Temperate",
+  "Boreal"
+)
+
+storage_climate_order <- c(
+  "Tropical Wet",
+  "Tropical Moist",
+  "Tropical Dry",
+  "Warm Temperate Moist",
+  "Warm Temperate Dry",
+  "Cool Temperate Moist",
+  "Cool Temperate Dry",
+  "Boreal Moist",
+  "Boreal Dry"
+)
+
+removal_schedule_order <- c(
+  "April",
+  "October",
+  "April_October",
+  "April_August_November"
+)
+
+animal_order <- c(
+  "Dairy Cattle",
+  "Non-Dairy Cattle",
+  "Layers",
+  "Broilers",
+  "Goat",
+  "Sheep",
+  "Swine",
+  "Swine_Finising",
+  "Swine_Sows and Piglets"
+)
+
+ef_fill_scale <- scale_fill_gradientn(
+  colours = c("#d8ead2", "#f0df9d", "#d69a45", "#a94438"),
+  limits = c(0, 1),
+  name = "EF"
+)
+
+format_ef <- function(value) {
+  sprintf("%.3f", value)
+}
+
+save_plot <- function(plot, file_name, width, height) {
+  ggplot2::ggsave(
+    filename = file.path(paths$figure_dir, file_name),
+    plot = plot,
+    width = width,
+    height = height,
+    dpi = 300,
+    bg = "white"
+  )
+}
+
+theme_tier2 <- function(base_size = 10) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      panel.grid = element_blank(),
+      plot.title = element_text(face = "bold"),
+      plot.subtitle = element_text(color = "#4f5963"),
+      axis.title = element_text(face = "bold"),
+      strip.text = element_text(face = "bold"),
+      legend.position = "bottom"
+    )
+}
+```
+
+## Read Outputs
+
+```{r}
+#| label: read-outputs
+#| message: false
+#| warning: false
+
+housing <- readr::read_csv(paths$housing_csv, show_col_types = FALSE)
+housing_mc <- readr::read_csv(paths$housing_mc_csv, show_col_types = FALSE)
+storage <- readr::read_csv(paths$storage_csv, show_col_types = FALSE)
+storage_mc <- readr::read_csv(paths$storage_mc_csv, show_col_types = FALSE)
+
+housing_long <- housing %>%
+  mutate(Animal_Type = factor(Animal_Type, levels = animal_order)) %>%
+  tidyr::pivot_longer(
+    cols = all_of(housing_climate_order),
+    names_to = "Climate_zone",
+    values_to = "EF_Deterministic"
+  ) %>%
+  mutate(
+    Stage = "Housing",
+    Row_Label = paste(Animal_Type, Housing, Manure_type, sep = " | "),
+    Climate_zone = factor(Climate_zone, levels = housing_climate_order)
+  )
+
+housing_mc_plot <- housing_mc %>%
+  mutate(
+    Animal_Type = factor(Animal_Type, levels = animal_order),
+    Stage = "Housing",
+    Row_Label = paste(Animal_Type, Housing, Manure_type, Climate_zone, sep = " | "),
+    Climate_zone = factor(Climate_zone, levels = housing_climate_order),
+    MC_Width = EF_MC_Upper95 - EF_MC_Lower95
+  )
+
+storage_plot <- storage %>%
+  mutate(
+    Animal_Type = factor(Animal_Type, levels = animal_order),
+    Stage = "Storage",
+    Row_Label = paste(Animal_Type, Storage, Manure_type, sep = " | "),
+    Climate_zone = factor(Climate_zone, levels = storage_climate_order),
+    Removal_Schedule = factor(Removal_Schedule, levels = removal_schedule_order)
+  )
+
+storage_mc_plot <- storage_mc %>%
+  mutate(
+    Animal_Type = factor(Animal_Type, levels = animal_order),
+    Stage = "Storage",
+    Row_Label = paste(
+      Animal_Type,
+      Storage,
+      Manure_type,
+      Removal_Schedule,
+      Climate_zone,
+      sep = " | "
+    ),
+    Climate_zone = factor(Climate_zone, levels = storage_climate_order),
+    Removal_Schedule = factor(Removal_Schedule, levels = removal_schedule_order),
+    MC_Width = EF_MC_Upper95 - EF_MC_Lower95
+  )
+```
+
+
+## Figure 1. Housing EF Heatmap
+
+The results used DATAMAN EFs as the reference EF and assumed the EFs were obtained at 15 C. CTs of Tied housing and deep litter were assumed same to Feedlot; CT of Layers in aviary house was assumed same to broiler; CTs of sows and pigelets were assumed same to finisher. 
+
+The housing heatmap shows a strong climate-temperature gradient, with highest
+values in the tropical zone and lowest values in the boreal zone.
+
+```{r}
+#| label: fig-housing-heatmap
+#| fig-width: 9
+#| fig-height: 7
+
+housing_heatmap_data <- housing_long %>%
+  arrange(Animal_Type, Housing, Manure_type) %>%
+  mutate(Row_Label = factor(Row_Label, levels = rev(unique(Row_Label))))
+
+fig_housing_heatmap <- ggplot(
+  housing_heatmap_data,
+  aes(x = Climate_zone, y = Row_Label, fill = EF_Deterministic)
+) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  geom_text(aes(label = format_ef(EF_Deterministic)), size = 2.6) +
+  ef_fill_scale +
+  labs(
+    title = "Housing deterministic NH3 emission factors",
+    subtitle = "Total-N basis; four broad climate zones",
+    x = "Climate zone",
+    y = NULL
+  ) +
+  theme_tier2(base_size = 9) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+fig_housing_heatmap
+save_plot(fig_housing_heatmap, "fig_01_housing_heatmap.png", 9, 7)
+```
+
+
+
+## Figure 2. Storage EF Heatmaps By Removal Schedule
+
+Storage EFs are highest in warm climates and under less frequent removal,
+because TAN can accumulate and remain available during high-volatilization
+months. There is no CT for swine lagoon.
+
+I found NH3 EF is not sensitive to removal frequency, unlike MCF. For instance,
+Dairy/manure heap/solid in tropical wet has 0.289 at single Oct removal, while
+0.276 with three removals. I think it is because of high corrected EF that
+volatilized abundance of TAN before removal.
+
+The annual NH3 EFs from storage was calculated as followed:
+
+EF = Annual NH3 emissions / Total avaiable TAN in storage.
+
+```{r}
+#| label: fig-storage-heatmaps
+#| fig-width: 13
+#| fig-height: 8
+
+storage_heatmap_data <- storage_plot %>%
+  arrange(Animal_Type, Storage, Manure_type) %>%
+  mutate(Row_Label = factor(Row_Label, levels = rev(unique(Row_Label))))
+
+fig_storage_heatmaps <- ggplot(
+  storage_heatmap_data,
+  aes(x = Climate_zone, y = Row_Label, fill = Year3_EF_TAN)
+) +
+  geom_tile(color = "white", linewidth = 0.35) +
+  geom_text(aes(label = format_ef(Year3_EF_TAN)), size = 2.1) +
+  facet_wrap(~ Removal_Schedule, ncol = 2) +
+  ef_fill_scale +
+  labs(
+    title = "Storage deterministic year-3 NH3 emission factors",
+    subtitle = "TAN-available-weighted year-3 monthly NH3-N / available TAN",
+    x = "Climate zone",
+    y = NULL
+  ) +
+  theme_tier2(base_size = 8) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.spacing = unit(1, "lines")
+  )
+
+fig_storage_heatmaps
+save_plot(fig_storage_heatmaps, "fig_02_storage_heatmaps.png", 13, 8)
+```
+
+
+
+## Figure 3. Monte Carlo Uncertainty Intervals
+
+MC results showed the difference between deterministic EF and the mean of MC < 0.001 for housing and <0.01 for storage. However, wide ranges were observed in warm temperate and tropical regions as the exponential increase in EF under warm temperature. 
+
+
+```{r}
+#| label: fig-mc-housing
+#| fig-width: 10
+#| fig-height: 7
+
+top_housing_uncertainty <- housing_mc_plot %>%
+  arrange(desc(EF_MC_Mean)) %>%
+  slice_head(n = 20) %>%
+  arrange(Animal_Type, Housing, Manure_type, Climate_zone) %>%
+  mutate(Row_Label = factor(Row_Label, levels = rev(Row_Label)))
+
+fig_mc_housing <- ggplot(
+  top_housing_uncertainty,
+  aes(x = EF_MC_Mean, y = Row_Label)
+) +
+  geom_errorbar(
+    aes(xmin = EF_MC_Lower95, xmax = EF_MC_Upper95),
+    orientation = "y",
+    width = 0.22,
+    color = "#69737d"
+  ) +
+  geom_point(aes(color = EF_Deterministic), size = 2.4) +
+  scale_color_gradient(low = "#5f9f6e", high = "#a94438", name = "Deterministic EF") +
+  labs(
+    title = "Housing Monte Carlo uncertainty intervals",
+    subtitle = "Top 20 combinations by 95% interval width, points represent the average of EF",
+    x = "EF, kg NH3-N / kg Total N",
+    y = NULL
+  ) +
+  theme_tier2(base_size = 9)
+
+fig_mc_housing
+save_plot(fig_mc_housing, "fig_03a_housing_mc_intervals.png", 10, 7)
+```
+
+```{r}
+#| label: fig-mc-storage
+#| fig-width: 10
+#| fig-height: 7
+
+top_storage_uncertainty <- storage_mc_plot %>%
+  arrange(desc(EF_MC_Mean)) %>%
+  slice_head(n = 20) %>%
+  arrange(Animal_Type, Storage, Manure_type, Removal_Schedule, Climate_zone) %>%
+  mutate(Row_Label = factor(Row_Label, levels = rev(Row_Label)))
+
+fig_mc_storage <- ggplot(
+  top_storage_uncertainty,
+  aes(x = EF_MC_Mean, y = Row_Label)
+) +
+  geom_errorbar(
+    aes(xmin = EF_MC_Lower95, xmax = EF_MC_Upper95),
+    orientation = "y",
+    width = 0.22,
+    color = "#69737d"
+  ) +
+  geom_point(aes(color = EF_Deterministic), size = 2.4) +
+  scale_color_gradient(low = "#5f9f6e", high = "#a94438", name = "Deterministic EF") +
+  labs(
+    title = "Storage Monte Carlo uncertainty intervals",
+    subtitle = "Top 20 combinations by 95% interval width, displayed in source animal order",
+    x = "EF, kg NH3-N / kg TAN",
+    y = NULL
+  ) +
+  theme_tier2(base_size = 9)
+
+fig_mc_storage
+save_plot(fig_mc_storage, "fig_03b_storage_mc_intervals.png", 10, 7)
+```
+
+
+## Figure 4. EF Distribution Comparison
+
+This summary highlights that storage EFs are generally larger than housing EFs,
+while also reminding that the basis differs: TAN for storage and Total N for
+housing.
+
+The medium of EF could be used as Tier 1 EF?
+
+```{r}
+#| label: fig-ef-distribution
+#| fig-width: 10
+#| fig-height: 6
+
+housing_distribution <- housing_long %>%
+  transmute(
+    Stage_Group = "Housing",
+    EF = EF_Deterministic
+  )
+
+storage_distribution <- storage_plot %>%
+  transmute(
+    Stage_Group = "Storage",
+    EF = Year3_EF_TAN
+  )
+
+distribution_data <- bind_rows(housing_distribution, storage_distribution) %>%
+  mutate(
+    Stage_Group = factor(
+      Stage_Group,
+      levels = c("Housing", "Storage")
+    )
+  )
+
+
+quantile_labels <- distribution_data %>%
+  group_by(Stage_Group) %>%
+  summarise(
+    q25 = quantile(EF, 0.25, na.rm = TRUE),
+    median = median(EF, na.rm = TRUE),
+    q75 = quantile(EF, 0.75, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(q25, median, q75),
+    names_to = "Statistic",
+    values_to = "EF"
+  ) %>%
+  mutate(
+    label = case_when(
+      Statistic == "q25" ~ paste0(round(EF, 3)),
+      Statistic == "median" ~ paste0(round(EF, 3)),
+      Statistic == "q75" ~ paste0(round(EF, 3))
+    )
+  )
+
+
+fig_distribution <- ggplot(distribution_data, aes(x = Stage_Group, y = EF)) +
+  geom_boxplot(fill = "#d8ead2", color = "#2e4b3d", outlier.alpha = 0.5) +
+  geom_jitter(width = 0.13, height = 0, alpha = 0.35, size = 1.1, color = "#a65b3b") +
+  geom_text(
+    data = quantile_labels,
+    aes(x = Stage_Group, y = EF, label = label),
+    inherit.aes = FALSE,
+    nudge_x = 0.38,
+    hjust = 0,
+    size = 2.6,
+    color = "#2e4b3d"
+  ) +
+  labs(
+    title = "Distribution of deterministic Tier 2 emission factors",
+    subtitle = "Housing is Total-N basis; storage is TAN basis",
+    x = NULL,
+    y = "EF, kg NH3-N / kg TAN or Total N"
+  ) +
+  theme_tier2(base_size = 9) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    plot.margin = margin(5.5, 35, 5.5, 5.5)
+  ) +
+  coord_cartesian(clip = "off")
+
+
+fig_distribution
+save_plot(fig_distribution, "fig_04_ef_distribution_comparison.png", 10, 6)
+```
+
