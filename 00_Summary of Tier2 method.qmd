@@ -11,22 +11,24 @@ format:
 
 ## Overview
 
-This report summarizes the proposed Tier 2 ammonia (`NH3-N`) emission factor
+This report summarized the proposed Tier 2 ammonia (`NH3-N`) emission factor
 outputs for animal housing and manure storage. 
 
-Housing emission factors are reported on a Total N basis and storage emission
+1. Housing emission factors are reported on a Total N basis and storage emission
 factors are reported on a TAN basis. Figures therefore compare patterns and
 relative magnitudes, but the denominator differs between the two stages.
 
-
-
-## Preparation
-
-Read the results from housing and storage and MC results. 
-
-Note that we only have 4 board climate for housing, while 9 climate zones for storage. 
-
+2. We reported 4 board climate for housing, while 9 climate zones for storage.
 There are 84 EFs for housing (21 animal/housing/manure combination x 4 climates) and 288 EFs for storage (8 animal/stroage/manure combination x 4 removal scenarios x 9 climates)
+
+3. Housing EFs ranged from 0.062-0.611 in tropical, 0.040-0.397 in warm temperate, 0.018-0.176 in cool temperature, and 0.009-0.146 in boreal regions. 
+
+4. Storage EFs were not sensitive to removal scenarios, but also variant in various climate zones. The highest EFs were observe from swine manure heap storage in Tropical wet, 0.582, while the lowest EFs were 0.048 from swine slurry in boreal dry. As the negligible difference of EFs between removal scenarios, I suggested using April-October as the representative scenario.
+
+5. Deterministic and Monte Carlo EFs represented similiar results. Housing Monte Carlo simulation includes uncertainties from annual temperature, Reference EF, and CT. Storage Monte Carlo simulation includes uncertainties from monthly temperature, Reference EF, CT, removal efficiency (not sensitive).  
+
+
+## Data Preparation
 
 ```{r}
 #| label: preparation
@@ -119,14 +121,8 @@ theme_tier2 <- function(base_size = 10) {
       legend.position = "bottom"
     )
 }
-```
 
-## Read Outputs
-
-```{r}
-#| label: read-outputs
-#| message: false
-#| warning: false
+#Read output
 
 housing <- readr::read_csv(paths$housing_csv, show_col_types = FALSE)
 housing_mc <- readr::read_csv(paths$housing_mc_csv, show_col_types = FALSE)
@@ -181,7 +177,6 @@ storage_mc_plot <- storage_mc %>%
     MC_Width = EF_MC_Upper95 - EF_MC_Lower95
   )
 ```
-
 
 ## Figure 1. Housing EF Heatmap
 
@@ -352,8 +347,6 @@ save_plot(fig_mc_storage, "fig_03b_storage_mc_intervals.png", 10, 7)
 This summary highlights that storage EFs are generally larger than housing EFs,
 while also reminding that the basis differs: TAN for storage and Total N for
 housing.
-
-The medium of EF could be used as Tier 1 EF?
 
 ```{r}
 #| label: fig-ef-distribution
