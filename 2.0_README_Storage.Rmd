@@ -5,12 +5,13 @@ output: html_document
 
 ## Purpose
 
-This note documents the calculation in `Proposed_Tier2_Storage.qmd`.
+This note documents the calculation in `2.1_Proposed_Tier2_Storage.qmd`.
 
 The goal is to prepare proposed Tier 2 manure storage ammonia (`NH3-N`)
-emission factors by animal type, storage type, manure type, removal schedule,
-and climate zone. The method uses monthly temperature and a TAN mass balance so
+emission factors by animal type, storage type, manure type, and broad climate
+zone. The method uses monthly outdoor temperature and a TAN mass balance so
 that TAN carried into warmer months has a stronger influence on the annual EF.
+Only the April and October removal schedule is retained.
 
 ## Input Files
 
@@ -21,8 +22,8 @@ Inputs/NH3_Correction_Factors.xlsx
 Inputs/Climate_zone_temperatures.xlsx
 ```
 
-Use `Inputs/NH3_Correction_Factors.xlsx`, sheet `Storage`, for reference EFs
-and CT values. Required columns are:
+Use `Inputs/NH3_Correction_Factors.xlsx`, sheet `Storage`, for reference EFs,
+row-specific reference air temperatures, and CT values. Required columns are:
 
 - `Animal_Type`
 - `Storage`
@@ -30,31 +31,36 @@ and CT values. Required columns are:
 - `EFs_TAN`
 - `EFs_Lower`
 - `EFs_Upper`
-- `CT_wet`
-- `CT_wet_Lower`
-- `CT_wet_Upper`
-- `CT_dry`
-- `CT_dry_Lower`
-- `CT_dry_Upper`
-- `Note`
+- `T_air`
+- `T_air_Lower`
+- `T_air_Upper`
+- `EF_Ref_15`
+- `CT`
+- `CT_Lower`
+- `CT_Upper`
 
-Use `Inputs/Climate_zone_temperatures.xlsx`, `Sheet2`, for monthly climate
-temperatures. Each month has a `Median` and `Std` value.
+Use `Inputs/Climate_zone_temperatures.xlsx`, `Sheet2`, for monthly outdoor
+climate temperatures. Each month has a `Median` and `Std` value.
 
-`Polar` is excluded. The storage proposal uses the remaining nine climate
-zones:
+## Climate Zone Aggregation
 
-```text
-Tropical Wet
-Tropical Moist
-Tropical Dry
-Warm Temperate Moist
-Warm Temperate Dry
-Cool Temperate Moist
-Cool Temperate Dry
-Boreal Moist
-Boreal Dry
+The storage proposal uses the same four broad climate zones as the housing
+proposal:
+
+```r
+broad_climate_map <- list(
+  Tropical = c("Tropical Wet", "Tropical Moist", "Tropical Dry"),
+  Warm_Temperate = c("Warm Temperate Moist", "Warm Temperate Dry"),
+  Cool_Temperate = c("Cool Temperate Moist", "Cool Temperate Dry"),
+  Boreal = c("Boreal Moist", "Boreal Dry")
+)
 ```
+
+For each broad climate zone, the qmd averages the component climate-zone
+monthly medians. Warm temperate and cool temperate therefore average their
+moist and dry component zones. Monthly `Std` values are averaged across
+component zones and treated as representative broad-zone variability, not as a
+formal uncertainty of the broad-zone mean. No wet/dry CT subzone logic is used.
 
 ## Editable Parameters
 
@@ -65,19 +71,15 @@ seed <- 2026
 n_iter <- 5000
 monthly_tan_kg <- 100
 simulation_years <- 3
-reference_temperature_c <- 15
 removal_efficiency_mean <- 0.95
 removal_efficiency_sd <- 0.03
 ef_max <- 1
 ```
 
-The four removal schedules are:
+The only retained removal schedule is:
 
 ```text
-April
-October
 April_October
-April_August_November
 ```
 
 ## Deterministic Method
@@ -85,21 +87,20 @@ April_August_November
 For each month, the temperature-corrected storage EF is:
 
 ```text
-EF_month = EFs_TAN * CT^(Temperature_month - reference_temperature_c)
+EF_month = EFs_TAN * CT^(Temperature_month - T_air)
 ```
 
-The EF is capped at `ef_max`, currently `1`.
+where:
 
-CT is selected from climate-zone moisture class:
+- `EFs_TAN` is the reference EF from the Storage sheet.
+- `CT` is the row-specific temperature correction factor from the updated
+  workbook.
+- `Temperature_month` is the broad climate-zone monthly outdoor temperature.
+- `T_air` is the row-specific reference outdoor air temperature from the
+  workbook.
 
-```text
-Dry climate zones   -> CT_dry
-Wet/Moist zones     -> CT_wet
-```
-
-If the selected CT is missing, the qmd uses uncorrected `EFs_TAN` and records
-`CT_Applied = FALSE`. This currently affects the Swine Lagoon row, because its
-wet and dry CT values are missing in the Storage sheet.
+The EF is capped at `ef_max`, currently `1`. If `CT` is missing, the qmd uses
+uncorrected `EFs_TAN` and records `CT_Applied = FALSE`.
 
 ## Storage Mass Balance
 
@@ -110,7 +111,7 @@ input, not extra pre-existing carryover.
 
 For every month:
 
-1. Remove stored TAN if the month is in the selected removal schedule.
+1. Remove stored TAN if the month is April or October.
 2. Add the current month's TAN input.
 3. Calculate NH3-N volatilization:
 
@@ -121,7 +122,7 @@ NH3_loss = min(available_TAN, available_TAN * EF_month)
 4. Carry the remaining TAN into the next month.
 
 Removal occurs at the start of the month, before the current month's TAN input
-is added. This matches the existing Shiny storage mass-flow convention.
+is added. This matches the existing storage mass-flow convention.
 
 The annual EF is calculated from year 3 only as the TAN-available-weighted mean
 of the monthly storage EF:
@@ -134,9 +135,6 @@ Year3_EF = weighted.average(
 )
 ```
 
-`TAN_Available_kg` is the TAN in storage after any scheduled removal and after
-adding the current month's TAN input, before NH3-N volatilization.
-
 The qmd also reports two diagnostics:
 
 ```text
@@ -148,9 +146,10 @@ Year3_Mass_Balance_EF = sum(year3_NH3_N_volatilized) / sum(year3_TAN_input)
 
 The Monte Carlo simulation propagates uncertainty from:
 
-- monthly temperature
+- monthly outdoor climate temperature
 - reference `EFs_TAN`
-- wet or dry CT
+- CT
+- row-specific reference temperature `T_air`
 - removal efficiency
 
 Settings:
@@ -161,11 +160,11 @@ n_iter <- 5000
 ```
 
 For temperature, the qmd simulates 5000 independent three-year monthly
-temperature sets for each of the nine climate zones. For each climate zone,
-month, year, and iteration:
+temperature sets for each of the four broad climate zones. For each climate
+zone, month, year, and iteration:
 
 ```text
-Temperature_sim = Normal(monthly_median, monthly_std)
+Temperature_sim = Normal(monthly_broad_median, monthly_broad_std)
 ```
 
 The temperature draws are saved in:
@@ -181,13 +180,17 @@ simulation year, with month columns from `Jan` through `Dec`.
 the housing qmd. The reported lower and upper bounds are treated as 95% bounds;
 draws outside the bounds are resampled.
 
+`T_air` is sampled from `T_air_Lower` and `T_air_Upper` using a bounded normal
+distribution.
+
 Removal efficiency is sampled once per iteration from a truncated normal:
 
 ```text
 Normal(0.95, 0.03), bounded to [0, 1]
 ```
 
-That sampled efficiency is reused for every removal event in that iteration.
+That sampled efficiency is reused for every April and October removal event in
+that iteration.
 
 ## Output Files
 
@@ -208,15 +211,14 @@ adds Monte Carlo mean and 95% interval columns.
 Expected row counts with default settings:
 
 ```text
-Proposed_Tier2_Storage.csv                 288 rows
-Proposed_Tier2_Storage_MC_Summary.csv      288 rows
-Proposed_Tier2_Storage_MC_Temperatures.csv 135000 rows
+Proposed_Tier2_Storage.csv                 32 rows
+Proposed_Tier2_Storage_MC_Summary.csv      32 rows
+Proposed_Tier2_Storage_MC_Temperatures.csv 60000 rows
 ```
 
 ## Housing Check Notes
 
-The existing housing workflow uses annual temperature and four broad climate
-zones:
+Both housing and storage now use the same four broad climate zones:
 
 ```text
 Tropical
@@ -225,30 +227,21 @@ Cool_Temperate
 Boreal
 ```
 
-The storage workflow uses monthly temperatures and the nine non-polar climate
-zones directly.
-
-Housing uses `EFs_TotalN` as the 15 C reference EF for the current proposal.
-Storage follows the same relationship but uses `EFs_TAN` as the configurable
-reference-temperature EF. The default reference temperature is 15 C.
-
-The existing Shiny storage tool uses a TAN carryover/removal mass balance. This
-qmd follows the same timing convention: removal happens at the start of selected
-months before the current month's TAN is added.
+Housing converts annual outdoor temperature to indoor temperature before
+correction. Storage uses monthly outdoor temperature directly. Both use the
+row-specific `T_air` column from `NH3_Correction_Factors.xlsx` as the reference
+temperature.
 
 ## Checks Before Finalizing
 
 After running the qmd, check:
 
-- `Polar` is absent from all storage outputs.
-- deterministic output has 288 rows.
-- Monte Carlo summary has 288 rows.
-- saved Monte Carlo temperature file has 135000 rows.
+- deterministic output has 32 rows.
+- Monte Carlo summary has 32 rows.
+- saved Monte Carlo temperature file has 60000 rows.
+- storage outputs contain only the four broad climate zones.
+- storage outputs do not include `CT_wet` or `CT_dry` columns.
 - `Year3_EF_TAN` is the TAN-available-weighted average year-3 monthly
   `NH3_N_kg / TAN_Available_kg`.
-- `Year3_Unweighted_Monthly_EF_TAN` is retained as the unweighted monthly EF
-  diagnostic.
-- `Year3_Mass_Balance_EF_TAN` is retained as a diagnostic using
-  `sum(year3_NH3_N_volatilized) / sum(year3_TAN_input)`.
 - storage EF values are finite, non-negative, and no greater than `ef_max`.
 - deterministic stored TAN never becomes negative.

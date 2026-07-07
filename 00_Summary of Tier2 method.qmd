@@ -6,6 +6,7 @@ format:
     toc: true
     toc-depth: 2
     code-fold: true
+    embed-resources: true
 
 ---
 
@@ -18,14 +19,24 @@ outputs for animal housing and manure storage.
 factors are reported on a TAN basis. Figures therefore compare patterns and
 relative magnitudes, but the denominator differs between the two stages.
 
-2. We reported 4 board climate for housing, while 9 climate zones for storage.
-There are 84 EFs for housing (21 animal/housing/manure combination x 4 climates) and 288 EFs for storage (8 animal/stroage/manure combination x 4 removal scenarios x 9 climates)
+2. We reported the same 4 broad climate zones for housing and storage:
+Tropical, Warm_Temperate, Cool_Temperate, and Boreal. There are 84 EFs for
+housing (21 animal/housing/manure combinations x 4 climates) and 32 EFs for
+storage (8 animal/storage/manure combinations x 1 removal schedule x 4
+climates).
 
-3. Housing EFs ranged from 0.062-0.611 in tropical, 0.040-0.397 in warm temperate, 0.018-0.176 in cool temperature, and 0.009-0.146 in boreal regions. 
+3. Housing EFs use row-specific indoor reference air temperature (`T_air`) and
+animal-specific indoor temperature equations to convert broad-zone outdoor
+temperature to indoor housing temperature.
 
-4. Storage EFs were not sensitive to removal scenarios, but also variant in various climate zones. The highest EFs were observe from swine manure heap storage in Tropical wet, 0.582, while the lowest EFs were 0.048 from swine slurry in boreal dry. As the negligible difference of EFs between removal scenarios, I suggested using April-October as the representative scenario.
+4. Storage EFs use row-specific outdoor reference air temperature (`T_air`) and
+the April-October removal schedule as the representative schedule because prior
+comparisons showed low sensitivity to removal scenarios.
 
-5. Deterministic and Monte Carlo EFs represented similiar results. Housing Monte Carlo simulation includes uncertainties from annual temperature, Reference EF, and CT. Storage Monte Carlo simulation includes uncertainties from monthly temperature, Reference EF, CT, removal efficiency (not sensitive).  
+5. Housing Monte Carlo simulation includes uncertainties from annual outdoor
+temperature, reference EF, and CT. Storage Monte Carlo simulation includes
+uncertainties from monthly outdoor temperature, reference EF, CT, and removal
+efficiency.
 
 
 ## Data Preparation
@@ -59,22 +70,14 @@ housing_climate_order <- c(
 )
 
 storage_climate_order <- c(
-  "Tropical Wet",
-  "Tropical Moist",
-  "Tropical Dry",
-  "Warm Temperate Moist",
-  "Warm Temperate Dry",
-  "Cool Temperate Moist",
-  "Cool Temperate Dry",
-  "Boreal Moist",
-  "Boreal Dry"
+  "Tropical",
+  "Warm_Temperate",
+  "Cool_Temperate",
+  "Boreal"
 )
 
 removal_schedule_order <- c(
-  "April",
-  "October",
-  "April_October",
-  "April_August_November"
+  "April_October"
 )
 
 animal_order <- c(
@@ -180,7 +183,9 @@ storage_mc_plot <- storage_mc %>%
 
 ## Figure 1. Housing EF Heatmap
 
-The results used DATAMAN EFs as the reference EF and assumed the EFs were obtained at 15 C. CTs of Tied housing and deep litter were assumed same to Feedlot; CT of Layers in aviary house was assumed same to broiler; CTs of sows and pigelets were assumed same to finisher. 
+The results use DATAMAN EFs as the reference EF at the row-specific `T_air`
+from the updated correction-factor workbook. Broad climate-zone outdoor annual
+temperatures are converted to indoor temperatures before CT correction.
 
 The housing heatmap shows a strong climate-temperature gradient, with highest
 values in the tropical zone and lowest values in the boreal zone.
@@ -216,25 +221,19 @@ save_plot(fig_housing_heatmap, "fig_01_housing_heatmap.png", 9, 7)
 
 
 
-## Figure 2. Storage EF Heatmaps By Removal Schedule
+## Figure 2. Storage EF Heatmap
 
-Storage EFs are highest in warm climates and under less frequent removal,
-because TAN can accumulate and remain available during high-volatilization
-months. There is no CT for swine lagoon.
+Only the April-October removal schedule is shown because previous checks found
+low sensitivity to removal scenarios.
 
-I found NH3 EF is not sensitive to removal frequency, unlike MCF. For instance,
-Dairy/manure heap/solid in tropical wet has 0.289 at single Oct removal, while
-0.276 with three removals. I think it is because of high corrected EF that
-volatilized abundance of TAN before removal.
+The annual storage NH3 EF is calculated as:
 
-The annual NH3 EFs from storage was calculated as followed:
-
-EF = Annual NH3 emissions / Total avaiable TAN in storage.
+EF = Annual NH3 emissions / Total available TAN in storage.
 
 ```{r}
 #| label: fig-storage-heatmaps
-#| fig-width: 13
-#| fig-height: 8
+#| fig-width: 9
+#| fig-height: 5
 
 storage_heatmap_data <- storage_plot %>%
   arrange(Animal_Type, Storage, Manure_type) %>%
@@ -245,8 +244,7 @@ fig_storage_heatmaps <- ggplot(
   aes(x = Climate_zone, y = Row_Label, fill = Year3_EF_TAN)
 ) +
   geom_tile(color = "white", linewidth = 0.35) +
-  geom_text(aes(label = format_ef(Year3_EF_TAN)), size = 2.1) +
-  facet_wrap(~ Removal_Schedule, ncol = 2) +
+  geom_text(aes(label = format_ef(Year3_EF_TAN)), size = 2.6) +
   ef_fill_scale +
   labs(
     title = "Storage deterministic year-3 NH3 emission factors",
@@ -261,14 +259,18 @@ fig_storage_heatmaps <- ggplot(
   )
 
 fig_storage_heatmaps
-save_plot(fig_storage_heatmaps, "fig_02_storage_heatmaps.png", 13, 8)
+save_plot(fig_storage_heatmaps, "fig_02_storage_heatmaps.png", 9, 5)
 ```
 
 
 
 ## Figure 3. Monte Carlo Uncertainty Intervals
 
-MC results showed the difference between deterministic EF and the mean of MC < 0.001 for housing and <0.01 for storage. However, wide ranges were observed in warm temperate and tropical regions as the exponential increase in EF under warm temperature. 
+Monte Carlo summaries are used to compare deterministic EFs with the mean and
+95% interval of simulated EFs. Wider ranges are expected in warm temperate and
+tropical regions because the CT correction is exponential under warmer
+temperatures. Red circles are deterministic EFs and green triangles are the mean
+of MC simulations. 
 
 
 ```{r}
@@ -292,11 +294,11 @@ fig_mc_housing <- ggplot(
     width = 0.22,
     color = "#69737d"
   ) +
-  geom_point(aes(color = EF_Deterministic), size = 2.4) +
-  scale_color_gradient(low = "#5f9f6e", high = "#a94438", name = "Deterministic EF") +
+  geom_point(aes(x = EF_Deterministic), shape = 16, size = 2.3, color = "#a94438") +
+  geom_point(aes(x = EF_MC_Mean), shape = 17, size = 2.7, color = "#2e4b3d") +
   labs(
     title = "Housing Monte Carlo uncertainty intervals",
-    subtitle = "Top 20 combinations by 95% interval width, points represent the average of EF",
+    subtitle = "Top 20 combinations by 95% interval width; circles are deterministic EF, triangles are MC mean",
     x = "EF, kg NH3-N / kg Total N",
     y = NULL
   ) +
@@ -327,11 +329,11 @@ fig_mc_storage <- ggplot(
     width = 0.22,
     color = "#69737d"
   ) +
-  geom_point(aes(color = EF_Deterministic), size = 2.4) +
-  scale_color_gradient(low = "#5f9f6e", high = "#a94438", name = "Deterministic EF") +
+  geom_point(aes(x = EF_Deterministic), shape = 16, size = 2.3, color = "#a94438") +
+  geom_point(aes(x = EF_MC_Mean), shape = 17, size = 2.7, color = "#2e4b3d") +
   labs(
     title = "Storage Monte Carlo uncertainty intervals",
-    subtitle = "Top 20 combinations by 95% interval width, displayed in source animal order",
+    subtitle = "Top 20 combinations by 95% interval width; circles are deterministic EF, triangles are MC mean",
     x = "EF, kg NH3-N / kg TAN",
     y = NULL
   ) +

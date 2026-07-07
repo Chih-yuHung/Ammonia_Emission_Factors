@@ -1,17 +1,18 @@
 ---
 title: "Proposed Tier 2 Storage NH3 Emission Factors"
 format: html
+embed-resources: true
 ---
 
 ## Overview
 
 This file calculates proposed Tier 2 manure storage ammonia emission factors by
-animal type, storage type, manure type, removal schedule, and climate zone.
+animal type, storage type, manure type, and broad climate zone.
 
 Storage uses a TAN mass-balance approach. Each month a fixed amount of TAN
 enters storage, temperature-corrected NH3 loss is calculated from available TAN,
 and remaining TAN is carried forward. The reported annual EF is calculated from
-the third simulation year.
+the third simulation year. Only the April and October removal schedule is used.
 
 ## Preparation
 
@@ -38,20 +39,12 @@ seed <- 2026
 n_iter <- 5000
 monthly_tan_kg <- 100
 simulation_years <- 3
-reference_temperature_c <- 15
 removal_efficiency_mean <- 0.95
 removal_efficiency_sd <- 0.03
 ef_max <- 1
 
 removal_schedules <- list(
-  April = month_numbers["Apr"],
-  October = month_numbers["Oct"],
-  April_October = c(month_numbers["Apr"], month_numbers["Oct"]),
-  April_August_November = c(
-    month_numbers["Apr"],
-    month_numbers["Aug"],
-    month_numbers["Nov"]
-  )
+  April_October = c(month_numbers["Apr"], month_numbers["Oct"])
 )
 
 paths <- list(
@@ -70,6 +63,15 @@ set.seed(seed)
 id_cols <- c("Animal_Type", "Storage", "Manure_type")
 total_months <- simulation_years * length(month_labels)
 year3_tan_input_kg <- length(month_labels) * monthly_tan_kg
+
+# Storage uses the same four broad climate zones as housing.
+broad_climate_map <- list(
+  Tropical = c("Tropical Wet", "Tropical Moist", "Tropical Dry"),
+  Warm_Temperate = c("Warm Temperate Moist", "Warm Temperate Dry"),
+  Cool_Temperate = c("Cool Temperate Moist", "Cool Temperate Dry"),
+  Boreal = c("Boreal Moist", "Boreal Dry")
+)
+climate_zones <- names(broad_climate_map)
 
 dir.create("Outputs", showWarnings = FALSE, recursive = TRUE)
 ```
@@ -92,9 +94,8 @@ names(factors) <- trimws(names(factors))
 required_factor_cols <- c(
   id_cols,
   "EFs_TAN", "EFs_Lower", "EFs_Upper",
-  "CT_wet", "CT_wet_Lower", "CT_wet_Upper",
-  "CT_dry", "CT_dry_Lower", "CT_dry_Upper",
-  "Note"
+  "T_air", "T_air_Lower", "T_air_Upper",
+  "EF_Ref_15", "CT", "CT_Lower", "CT_Upper"
 )
 
 missing_factor_cols <- setdiff(required_factor_cols, names(factors))
@@ -102,12 +103,11 @@ if (length(missing_factor_cols) > 0) {
   stop("Missing Storage-sheet columns: ", paste(missing_factor_cols, collapse = ", "))
 }
 
-for (col in c(id_cols, "Note")) {
+for (col in id_cols) {
   factors[[col]] <- trimws(as.character(factors[[col]]))
 }
-factors$Note[is.na(factors$Note) | factors$Note == "NA"] <- ""
 
-numeric_factor_cols <- setdiff(required_factor_cols, c(id_cols, "Note"))
+numeric_factor_cols <- setdiff(required_factor_cols, id_cols)
 for (col in numeric_factor_cols) {
   factors[[col]] <- suppressWarnings(as.numeric(factors[[col]]))
 }
@@ -142,8 +142,7 @@ clean_climate_table <- function(climate_table) {
   climate_table <- climate_table[
     !is.na(climate_table$Climate_zone) &
       nzchar(climate_table$Climate_zone) &
-      climate_table$Climate_zone != "0" &
-      climate_table$Climate_zone != "Polar",
+      climate_table$Climate_zone != "0",
     ,
     drop = FALSE
   ]
@@ -159,18 +158,47 @@ clean_climate_table <- function(climate_table) {
 climate_medians <- clean_climate_table(climate_medians)
 climate_stds <- clean_climate_table(climate_stds)
 
-climate_zones <- climate_medians$Climate_zone
+get_climate_matrix <- function(climate_table, component_zones) {
+  climate_rows <- climate_table[climate_table$Climate_zone %in% component_zones, ]
 
-if (!identical(climate_zones, climate_stds$Climate_zone)) {
-  stop("Climate median and Std tables have different climate-zone rows.")
+  if (nrow(climate_rows) != length(component_zones)) {
+    stop(
+      "Expected climate rows for: ",
+      paste(component_zones, collapse = ", ")
+    )
+  }
+
+  as.matrix(climate_rows[month_labels])
 }
 
-if (length(climate_zones) != 9) {
-  stop("Expected 9 non-polar climate zones; found ", length(climate_zones), ".")
+broad_climate_medians <- data.frame(
+  Climate_zone = climate_zones,
+  matrix(NA_real_, nrow = length(climate_zones), ncol = length(month_labels)),
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+broad_climate_stds <- broad_climate_medians
+names(broad_climate_medians) <- c("Climate_zone", month_labels)
+names(broad_climate_stds) <- c("Climate_zone", month_labels)
+
+for (climate_zone in climate_zones) {
+  component_zones <- broad_climate_map[[climate_zone]]
+  median_matrix <- get_climate_matrix(climate_medians, component_zones)
+  std_matrix <- get_climate_matrix(climate_stds, component_zones)
+
+  broad_climate_medians[
+    broad_climate_medians$Climate_zone == climate_zone,
+    month_labels
+  ] <- as.list(colMeans(median_matrix, na.rm = TRUE))
+
+  broad_climate_stds[
+    broad_climate_stds$Climate_zone == climate_zone,
+    month_labels
+  ] <- as.list(colMeans(std_matrix, na.rm = TRUE))
 }
 
 factors
-climate_medians
+broad_climate_medians
 ```
 
 ## Calculation Functions
@@ -184,28 +212,12 @@ cap_ef <- function(ef_value) {
   pmin(ef_value, ef_max)
 }
 
-ct_basis_for_climate <- function(climate_zone) {
-  if (grepl("Dry$", climate_zone)) {
-    return("dry")
-  }
-
-  "wet"
-}
-
-ct_columns_for_basis <- function(ct_basis) {
-  if (identical(ct_basis, "dry")) {
-    return(c(center = "CT_dry", lower = "CT_dry_Lower", upper = "CT_dry_Upper"))
-  }
-
-  c(center = "CT_wet", lower = "CT_wet_Lower", upper = "CT_wet_Upper")
-}
-
-calculate_monthly_ef <- function(ef_ref, ct, temperatures_c) {
+calculate_monthly_ef <- function(ef_ref, ct, temperatures_c, t_air_reference_c) {
   if (is.na(ct)) {
     return(cap_ef(rep(ef_ref, length(temperatures_c))))
   }
 
-  cap_ef(ef_ref * ct^(temperatures_c - reference_temperature_c))
+  cap_ef(ef_ref * ct^(temperatures_c - t_air_reference_c))
 }
 
 simulate_storage_annual_ef <- function(
@@ -345,16 +357,18 @@ for (row_index in seq_len(nrow(factors))) {
     removal_month_names <- paste(month_labels[removal_months], collapse = ";")
 
     for (climate_zone in climate_zones) {
-      ct_basis <- ct_basis_for_climate(climate_zone)
-      ct_cols <- ct_columns_for_basis(ct_basis)
       temperatures <- as.numeric(
-        climate_medians[climate_medians$Climate_zone == climate_zone, month_labels]
+        broad_climate_medians[
+          broad_climate_medians$Climate_zone == climate_zone,
+          month_labels
+        ]
       )
 
       monthly_ef <- calculate_monthly_ef(
         ef_ref = factors$EFs_TAN[row_index],
-        ct = factors[[ct_cols["center"]]][row_index],
-        temperatures_c = temperatures
+        ct = factors$CT[row_index],
+        temperatures_c = temperatures,
+        t_air_reference_c = factors$T_air[row_index]
       )
 
       ef_matrix <- matrix(rep(monthly_ef, simulation_years), nrow = 1)
@@ -372,11 +386,11 @@ for (row_index in seq_len(nrow(factors))) {
         Removal_Schedule = schedule_name,
         Removal_Months = removal_month_names,
         Climate_zone = climate_zone,
-        CT_Basis = ifelse(ct_basis == "dry", "Dry", "Wet"),
-        CT = factors[[ct_cols["center"]]][row_index],
-        CT_Applied = !is.na(factors[[ct_cols["center"]]][row_index]),
+        CT = factors$CT[row_index],
+        CT_Applied = !is.na(factors$CT[row_index]),
         EFs_TAN = factors$EFs_TAN[row_index],
-        Reference_Temperature_C = reference_temperature_c,
+        T_air_Reference_C = factors$T_air[row_index],
+        Annual_Outdoor_Temperature_C = round(mean(temperatures, na.rm = TRUE), 3),
         Monthly_TAN_kg = monthly_tan_kg,
         Removal_Efficiency = removal_efficiency_mean,
         Year3_TAN_Input_kg = simulated$year3_tan,
@@ -389,7 +403,6 @@ for (row_index in seq_len(nrow(factors))) {
         ),
         Year3_Mass_Balance_EF_TAN = round(simulated$year3_mass_balance_ef, 3),
         Final_Stored_TAN_kg = simulated$final_stored_tan,
-        Note = factors$Note[row_index],
         stringsAsFactors = FALSE
       )
 
@@ -427,12 +440,12 @@ for (climate_index in seq_along(climate_zones)) {
   )
 
   for (month in month_labels) {
-    month_median <- climate_medians[
-      climate_medians$Climate_zone == climate_zone,
+    month_median <- broad_climate_medians[
+      broad_climate_medians$Climate_zone == climate_zone,
       month
     ]
-    month_std <- climate_stds[
-      climate_stds$Climate_zone == climate_zone,
+    month_std <- broad_climate_stds[
+      broad_climate_stds$Climate_zone == climate_zone,
       month
     ]
 
@@ -504,32 +517,34 @@ for (row_index in seq_len(nrow(factors))) {
     upper = factors$EFs_Upper[row_index]
   )
 
-  ct_samples_by_basis <- list()
-  for (ct_basis in c("wet", "dry")) {
-    ct_cols <- ct_columns_for_basis(ct_basis)
-    ct_samples_by_basis[[ct_basis]] <- sample_bounded_lognormal(
-      n = n_iter,
-      center = factors[[ct_cols["center"]]][row_index],
-      lower = factors[[ct_cols["lower"]]][row_index],
-      upper = factors[[ct_cols["upper"]]][row_index]
-    )
-  }
+  ct_samples <- sample_bounded_lognormal(
+    n = n_iter,
+    center = factors$CT[row_index],
+    lower = factors$CT_Lower[row_index],
+    upper = factors$CT_Upper[row_index]
+  )
+
+  t_air_samples <- sample_truncated_normal(
+    n = n_iter,
+    mean = factors$T_air[row_index],
+    sd = (factors$T_air_Upper[row_index] - factors$T_air_Lower[row_index]) / (2 * 1.96),
+    lower = factors$T_air_Lower[row_index],
+    upper = factors$T_air_Upper[row_index]
+  )
 
   for (schedule_name in names(removal_schedules)) {
     removal_months <- removal_schedules[[schedule_name]]
     removal_month_names <- paste(month_labels[removal_months], collapse = ";")
 
     for (climate_zone in climate_zones) {
-      ct_basis <- ct_basis_for_climate(climate_zone)
-      ct_cols <- ct_columns_for_basis(ct_basis)
-      ct_center <- factors[[ct_cols["center"]]][row_index]
+      ct_center <- factors$CT[row_index]
       temp_matrix <- temperature_matrices[[climate_zone]]
 
       if (is.na(ct_center)) {
         ef_matrix <- matrix(ef_samples, nrow = n_iter, ncol = total_months)
       } else {
-        ct_samples <- ct_samples_by_basis[[ct_basis]]
-        ef_matrix <- ef_samples * ct_samples^(temp_matrix - reference_temperature_c)
+        ef_matrix <- ef_samples *
+          ct_samples^(temp_matrix - t_air_samples)
       }
 
       ef_matrix <- cap_ef(ef_matrix)
@@ -556,10 +571,12 @@ for (row_index in seq_len(nrow(factors))) {
         Removal_Schedule = schedule_name,
         Removal_Months = removal_month_names,
         Climate_zone = climate_zone,
-        CT_Basis = ifelse(ct_basis == "dry", "Dry", "Wet"),
         CT_Applied = !is.na(ct_center),
+        CT = ct_center,
         EFs_TAN = factors$EFs_TAN[row_index],
-        Reference_Temperature_C = reference_temperature_c,
+        T_air_Reference_C = factors$T_air[row_index],
+        T_air_Lower_C = factors$T_air_Lower[row_index],
+        T_air_Upper_C = factors$T_air_Upper[row_index],
         Monthly_TAN_kg = monthly_tan_kg,
         Removal_Efficiency_Mean = removal_efficiency_mean,
         Removal_Efficiency_SD = removal_efficiency_sd,
@@ -591,7 +608,6 @@ for (row_index in seq_len(nrow(factors))) {
           mean(simulated$final_stored_tan, na.rm = TRUE),
           3
         ),
-        Note = factors$Note[row_index],
         stringsAsFactors = FALSE
       )
 
@@ -627,10 +643,25 @@ if (nrow(mc_temperatures) != expected_temperature_rows) {
   stop("Unexpected Monte Carlo temperature rows: ", nrow(mc_temperatures))
 }
 
-if ("Polar" %in% proposed_result$Climate_zone ||
-    "Polar" %in% mc_summary$Climate_zone ||
-    "Polar" %in% mc_temperatures$Climate_zone) {
-  stop("Polar climate zone should be excluded from storage outputs.")
+if (!setequal(proposed_result$Climate_zone, climate_zones) ||
+    !setequal(mc_summary$Climate_zone, climate_zones) ||
+    !setequal(mc_temperatures$Climate_zone, climate_zones)) {
+  stop("Storage outputs should contain exactly the four broad climate zones.")
+}
+
+if (!identical(unique(proposed_result$Climate_zone), climate_zones) ||
+    !identical(unique(mc_summary$Climate_zone), climate_zones) ||
+    !identical(unique(mc_temperatures$Climate_zone), climate_zones)) {
+  stop("Storage broad climate zones are not in the expected order.")
+}
+
+if (any(grepl("CT_wet|CT_dry", names(proposed_result))) ||
+    any(grepl("CT_wet|CT_dry", names(mc_summary)))) {
+  stop("Storage outputs should not include wet/dry CT columns.")
+}
+
+if (any(is.na(factors$T_air))) {
+  stop("Storage T_air reference temperatures should not contain missing values.")
 }
 
 if (any(!is.finite(proposed_result$Year3_EF_TAN))) {
@@ -717,14 +748,23 @@ output_summary
 ## Method Notes
 
 The storage calculation uses `EFs_TAN` as the reference-temperature emission
-factor. The default reference temperature is 15 degrees C, but it is controlled
-by `reference_temperature_c` in the editable parameter block.
+factor at the row-specific outdoor storage reference temperature `T_air`.
+Monthly broad climate-zone outdoor temperatures are corrected with:
 
-Climate zones ending in `Dry` use dry CT values. Other non-polar climate zones
-use wet CT values. If the relevant CT value is missing, the calculation carries
-`EFs_TAN` forward without temperature correction and records `CT_Applied =
-FALSE`.
+```text
+EF_month = EFs_TAN * CT^(Temperature_month - T_air)
+```
+
+Broad climate zones are represented by averaging component climate-zone monthly
+medians. Warm temperate and cool temperate average their moist and dry component
+zones, and no wet/dry CT subzone distinction is used. Monthly `Std` values are
+averaged across component zones and treated as representative broad-zone
+variability, not as a formal uncertainty of the broad-zone mean.
+
+Only the April and October removal schedule is used because prior comparisons
+showed storage EFs were not sensitive to the other removal scenarios.
 
 The Monte Carlo temperature output is written in a reusable wide format with one
-row per iteration, climate zone, and simulation year, and one column for each
-month.
+row per iteration, broad climate zone, and simulation year, and one column for
+each month. Monte Carlo simulations also sample the row-specific reference
+temperature `T_air` from `T_air_Lower` and `T_air_Upper`.
