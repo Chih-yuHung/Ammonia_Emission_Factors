@@ -5,101 +5,104 @@ output: html_document
 
 ## Overview
 
-This project contains a Shiny app for estimating NH<sub>3</sub> emissions from either animal housing or manure storage.
+This folder contains a Shiny app for estimating ammonia (`NH3-N`) emission
+factors and annual emissions for animal housing or manure storage.
 
-The app has two calculation sections:
+The app follows the current proposed Tier 2 methods documented in:
 
-- `Housing`: uses Total N and housing correction factors from `Inputs/NH3_Correction_Factors.csv`.
-- `Storage`: uses TAN and the existing storage mass-flow model with storage/cover factors and optional removal assumptions.
+- `1.1_Proposed_Tier2_Housing.qmd`
+- `2.1_Proposed_Tier2_Storage.qmd`
+
+Both calculation sections read directly from
+`Inputs/NH3_Correction_Factors.xlsx`.
 
 ## Housing Calculation
 
-Housing emission factors are based on real farm observations, mostly from cool temperate moist regions.
+Housing uses the `Housing` sheet from `Inputs/NH3_Correction_Factors.xlsx`.
+The required columns are:
 
-Reference climate source:
+- `Animal_Type`
+- `Housing`
+- `Manure_type`
+- `EFs_TotalN`
+- `T_air`
+- `CT_15`
+- `Note`
 
-`Reference Global Climate Zone, 1995-2024`
+Users enter one annual temperature and choose whether it is an outdoor or
+indoor temperature. If the temperature is outdoor, the app converts it to an
+animal-specific indoor housing temperature using the equations from
+`1.1_Proposed_Tier2_Housing.qmd`.
 
-The housing correction equation is:
+The annual housing EF is:
 
-`EF_T = EFref_TotalN * CT^(T - Tref)`
+```text
+EF = EFs_TotalN * CT_15^(T_indoor - T_air)
+```
 
-Where:
+where `T_air` is the row-specific indoor reference temperature from the
+workbook. The EF is capped at `1 kg NH3-N/kg Total N`.
 
-- `EFref_TotalN` is the reference housing emission factor in `kg NH3-N/kg Total N`
-- `CT` is selected from `CT_wet` or `CT_dry`
-- `T` is the user-provided housing temperature
-- `Tref` is the reference temperature
+If the workbook `Note` contains a threshold such as
+`Only applicable to T >15`, CT is applied only when the corrected indoor
+temperature is above that threshold. Otherwise the EF remains `EFs_TotalN`.
+Workbook notes are displayed in the app for the selected housing row.
 
-Monthly reference temperatures from January to December are:
+Annual housing emissions are calculated as:
 
-`-5.4, -4.4, 0.4, 6.6, 11.8, 16.4, 18.8, 17.8, 13.1, 7.7, 2.4, -2.9`
+```text
+NH3-N = annual Total N * annual EF
+```
 
-The annual reference temperature is:
-
-`6.8`
-
-If `EFs_TotalN` is missing in the correction-factor file, the app uses the matching app default `EFTref` converted from percent to decimal. For example, Sheep `25.0%` becomes `0.25`, and Swine `29.6%` becomes `0.296`.
-
-Some CT values are only applicable over certain temperature ranges. These notes are displayed in the app and included in the downloaded CSV, but the app does not enforce the temperature thresholds.
-
-Housing emissions are calculated as:
-
-`NH3 emission = Total N * corrected EF`
+If annual Total N is blank, the app reports the EF only.
 
 ## Storage Calculation
 
-Storage keeps the existing TAN-based model.
+Storage uses the `Storage` sheet from `Inputs/NH3_Correction_Factors.xlsx`.
+The required columns are:
 
-For each month, the app calculates:
+- `Animal_Type`
+- `Storage`
+- `Manure_type`
+- `EFs_TAN`
+- `T_air`
+- `CT`
 
-`EF_T = EFTref * CT^(T - Tref)`
+Users enter 12 monthly air temperatures for the primary scenario. They may also
+upload a CSV file with additional monthly temperature scenarios in this format:
 
-Then applies the storage/cover multiplier:
+```text
+Scenario,Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec
+```
 
-`Adjusted EF = EF_T * storage/cover multiplier`
+The monthly storage EF is:
 
-If TAN is provided, the app:
+```text
+EF_month = EFs_TAN * CT^(Temperature_month - T_air)
+```
 
-1. Removes the selected percentage of TAN already stored if the month is a removal month.
-2. Adds the current month's generated TAN.
-3. Calculates NH<sub>3</sub> emission as:
+where `T_air` is the row-specific outdoor reference temperature from the
+workbook. The EF is capped at `1 kg NH3-N/kg TAN`.
 
-`Monthly NH3 emission = min(TAN available, TAN available * Adjusted EF / 100)`
+The storage mass balance uses fixed current-method assumptions:
 
-4. Carries remaining TAN forward to the next month.
+- annual TAN is split evenly across months;
+- the simulation runs for 3 years;
+- removal occurs at the start of April and October;
+- removal efficiency is 95%;
+- annual EF and NH3-N emissions are reported from year 3.
 
-Removed TAN leaves the storage model and is not counted as later field-application NH<sub>3</sub> emission in this app version.
-
-## Temperature CSV Upload
-
-Users can upload multiple monthly temperature scenarios with this wide CSV format:
-
-`Scenario,Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec`
-
-The file `temperature_upload_template.csv` provides an example.
-
-Uploaded scenarios use the currently selected calculation section and assumptions. They are included in the downloaded CSV results but are not plotted in the app.
-
-## App Features
-
-- Top-level Housing or Storage calculation selector
-- Housing-specific animal, housing, manure type, correction-factor row, and wet/dry CT inputs
-- Housing Total N input as annual Total N or 12 monthly Total N values
-- Storage-specific animal, storage, cover/crust, removal, and TAN inputs
-- Manual annual or monthly temperature inputs for housing
-- Manual monthly manure temperature inputs for storage
-- Batch monthly temperature CSV upload
-- Downloadable temperature template CSV
-- Downloadable results CSV including uploaded scenarios
+If annual TAN is blank, the app reports storage EFs only.
+In that EF-only case, it still runs the same three-year mass-balance method
+using a nominal `100 kg TAN/month` only to calculate the year-3 weighted EF.
+NH3-N mass outputs are left blank because no user TAN amount was supplied.
 
 ## Files
 
 - `app.R`: main Shiny application
-- `Reference/NH3_Correction_Factors.csv`: housing correction-factor source used by the app
-- `Reference/NH3_Correction_Factors.xlsx`: source workbook for housing correction factors
+- `server.R`: constants, workbook loading, calculations, and Shiny server logic
+- `ui.R`: Shiny UI layout
 - `temperature_upload_template.csv`: monthly temperature upload template
-- `NH3_EF_correction_notes.md`: source notes for the temperature-correction logic
 
 ## Run The App
 
@@ -109,8 +112,8 @@ Open R or RStudio in this folder and run:
 shiny::runApp()
 ```
 
-Or run the file directly:
+Or from the project root:
 
 ```r
-source("app.R")
+shiny::runApp("ShinyApp")
 ```

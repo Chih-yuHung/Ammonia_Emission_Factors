@@ -1,5 +1,48 @@
 # Shiny UI layout only. Shared choices and helper functions are defined in server.R.
 
+library(shiny)
+
+month_labels <- c(
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+)
+
+make_month_input <- function(id, label) {
+  numericInput(
+    inputId = id,
+    label = label,
+    value = NA_real_,
+    min = -50,
+    width = "100%"
+  )
+}
+
+month_input_grid <- function(prefix, input_fun) {
+  fluidRow(
+    column(
+      width = 4,
+      input_fun(paste0(prefix, "_jan"), "Jan"),
+      input_fun(paste0(prefix, "_apr"), "Apr"),
+      input_fun(paste0(prefix, "_jul"), "Jul"),
+      input_fun(paste0(prefix, "_oct"), "Oct")
+    ),
+    column(
+      width = 4,
+      input_fun(paste0(prefix, "_feb"), "Feb"),
+      input_fun(paste0(prefix, "_may"), "May"),
+      input_fun(paste0(prefix, "_aug"), "Aug"),
+      input_fun(paste0(prefix, "_nov"), "Nov")
+    ),
+    column(
+      width = 4,
+      input_fun(paste0(prefix, "_mar"), "Mar"),
+      input_fun(paste0(prefix, "_jun"), "Jun"),
+      input_fun(paste0(prefix, "_sep"), "Sep"),
+      input_fun(paste0(prefix, "_dec"), "Dec")
+    )
+  )
+}
+
 ui <- fluidPage(
   tags$head(
     tags$style(HTML("
@@ -10,15 +53,15 @@ ui <- fluidPage(
       .panel-card {
         background: #ffffff;
         border: 1px solid #d8ddd3;
-        border-radius: 10px;
+        border-radius: 8px;
         padding: 16px;
         margin-bottom: 16px;
         box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
       }
       .summary-card {
-        background: linear-gradient(135deg, #f5f1de 0%, #eef3e6 100%);
+        background: #eef3e6;
         border: 1px solid #d6dccd;
-        border-radius: 10px;
+        border-radius: 8px;
         padding: 14px 16px;
         min-height: 100px;
       }
@@ -39,6 +82,15 @@ ui <- fluidPage(
       .help-note {
         font-size: 12px;
         color: #5d665b;
+      }
+      .assumption-note {
+        font-size: 13px;
+        line-height: 1.4;
+        color: #3f4c3f;
+        background: #f4f7ef;
+        border-left: 4px solid #8fa96f;
+        padding: 10px 12px;
+        margin-top: 8px;
       }
       .action-row .btn {
         width: 100%;
@@ -90,51 +142,40 @@ ui <- fluidPage(
           selectInput("housing_house", "Housing type", choices = NULL),
           selectInput("housing_manure", "Manure type", choices = NULL),
           selectInput("housing_factor_row", "Correction factor option", choices = NULL),
-          radioButtons(
-            inputId = "housing_ct_basis",
-            label = "Climate CT basis",
-            choices = c("Wet" = "wet", "Dry" = "dry"),
-            selected = "wet",
-            inline = TRUE
-          ),
-          tags$div(class = "help-note", textOutput("housing_factor_note"))
+          tags$div(class = "assumption-note", textOutput("housing_factor_note"))
         ),
         div(
           class = "panel-card",
-          h4("Temperature"),
+          h4("Annual Temperature"),
           radioButtons(
-            inputId = "housing_temp_mode",
-            label = "Temperature entry mode",
-            choices = c("Annual temperature" = "annual", "12 monthly temperatures" = "monthly"),
-            selected = "monthly"
+            inputId = "housing_temperature_basis",
+            label = "Temperature basis",
+            choices = c(
+              "Outdoor annual temperature" = "outdoor",
+              "Indoor annual temperature" = "indoor"
+            ),
+            selected = "outdoor"
           ),
-          conditionalPanel(
-            condition = "input.housing_temp_mode == 'annual'",
-            numericInput("housing_annual_temp", "Annual temperature (deg C)", value = NA_real_, width = "100%"),
-            numericInput("housing_ref_annual_temp", "Annual reference temperature (deg C)", value = housing_ref_annual_temp, width = "100%")
-          ),
-          conditionalPanel(
-            condition = "input.housing_temp_mode == 'monthly'",
-            month_input_grid("housing_temp", make_month_input)
+          numericInput(
+            "housing_annual_temp",
+            "Annual temperature (deg C)",
+            value = NA_real_,
+            width = "100%"
           )
         ),
         div(
           class = "panel-card",
-          h4("Total N Input"),
-          radioButtons(
-            inputId = "total_n_mode",
-            label = "Total N entry mode",
-            choices = c("Annual Total N" = "annual", "12 monthly Total N values" = "monthly"),
-            selected = "annual"
+          h4(tagList("Annual Total N for ", "NH", tags$sub("3"), " Emissions")),
+          numericInput(
+            "annual_total_n",
+            "Annual Total N (kg N)",
+            value = NA_real_,
+            min = 0,
+            width = "100%"
           ),
-          conditionalPanel(
-            condition = "input.total_n_mode == 'annual'",
-            numericInput("annual_total_n", "Annual Total N (kg N)", value = NA_real_, min = 0, width = "100%"),
-            tags$p(class = "help-note", "Annual Total N is evenly distributed across months for monthly calculations.")
-          ),
-          conditionalPanel(
-            condition = "input.total_n_mode == 'monthly'",
-            month_input_grid("total_n", make_nonnegative_month_input)
+          tags$p(
+            class = "help-note",
+            "Leave blank to calculate the EF only."
           )
         )
       ),
@@ -142,71 +183,48 @@ ui <- fluidPage(
         condition = "input.calculation_section == 'storage'",
         div(
           class = "panel-card",
-          h4("Storage Animal Parameters"),
-          selectInput(
-            inputId = "storage_animal_type",
-            label = "Animal type",
-            choices = storage_animal_defaults$animal_type,
-            selected = storage_animal_defaults$animal_type[1]
-          ),
-          tags$div(class = "help-note", strong("Temperature coefficient (CT): "), textOutput("storage_ct_display", inline = TRUE)),
-          tags$div(class = "help-note", strong("IPCC storage group: "), textOutput("storage_ipcc_group_display", inline = TRUE)),
-          numericInput("storage_tref", "Tref (deg C)", value = 15, width = "100%"),
-          numericInput("storage_eftref", "EFTref (%)", value = storage_animal_defaults$eftref[1], min = 0, width = "100%"),
-          tags$p(class = "help-note", "Auto-filled from animal type, but you can edit it.")
+          h4("Storage Factors"),
+          selectInput("storage_animal", "Animal type", choices = NULL),
+          selectInput("storage_type", "Storage type", choices = NULL),
+          selectInput("storage_manure", "Manure type", choices = NULL),
+          selectInput("storage_factor_row", "Correction factor option", choices = NULL),
+          tags$div(class = "assumption-note", textOutput("storage_factor_note"))
         ),
         div(
           class = "panel-card",
-          h4("Average Monthly Manure Temperature (deg C)"),
+          h4("Monthly Air Temperatures (deg C)"),
           month_input_grid("storage_temp", make_month_input)
         ),
         div(
           class = "panel-card",
-          h4("Storage Assumptions"),
-          selectInput("storage_type", "Storage type", choices = storage_choices, selected = "slurry_tank"),
-          selectInput("cover_condition", "Cover/crust condition", choices = cover_choices, selected = "uncovered"),
-          tags$div(class = "help-note", strong("Storage/cover multiplier: "), textOutput("storage_multiplier_display", inline = TRUE)),
-          numericInput("removal_efficiency", "Removal efficiency (%)", value = 95, min = 0, max = 100, width = "100%"),
-          selectInput(
-            inputId = "removal_months",
-            label = "Removal months",
-            choices = stats::setNames(as.character(seq_along(month_labels)), month_labels),
-            selected = character(0),
-            multiple = TRUE
+          h4(tagList("Annual TAN for ", "NH", tags$sub("3"), " Emissions")),
+          numericInput(
+            "annual_tan",
+            "Annual TAN generated (kg N)",
+            value = NA_real_,
+            min = 0,
+            width = "100%"
+          ),
+          tags$p(
+            class = "help-note",
+            "Annual TAN is split evenly across months in the three-year storage simulation. Leave blank to calculate EFs only."
           )
         ),
         div(
           class = "panel-card",
-          h4(tagList("TAN Input for ", "NH", tags$sub("3"), " Emissions")),
-          radioButtons(
-            inputId = "tan_mode",
-            label = "TAN entry mode",
-            choices = c("Annual TAN" = "annual", "12 monthly TANs" = "monthly"),
-            selected = "annual"
-          ),
-          conditionalPanel(
-            condition = "input.tan_mode == 'annual'",
-            numericInput("annual_tan", "Annual TAN generated (kg N)", value = NA_real_, min = 0, width = "100%"),
-            tags$p(class = "help-note", "Annual TAN is evenly distributed across the 12 months.")
-          ),
-          conditionalPanel(
-            condition = "input.tan_mode == 'monthly'",
-            month_input_grid("tan", make_nonnegative_month_input)
-          ),
-          tags$p(class = "help-note", "Removed TAN exits this storage model and is not counted as later NH3 emission.")
+          h4("Batch Monthly Temperatures"),
+          fileInput("temperature_csv", "Upload temperature scenario CSV", accept = ".csv"),
+          downloadButton("download_temperature_template", "Download Template", class = "download-button"),
+          tags$p(
+            class = "help-note",
+            "CSV format: Scenario, Jan, Feb, Mar, Apr, May, Jun, Jul, Aug, Sep, Oct, Nov, Dec."
+          )
         )
-      ),
-      div(
-        class = "panel-card",
-        h4("Batch Monthly Temperatures"),
-        fileInput("temperature_csv", "Upload temperature scenario CSV", accept = ".csv"),
-        downloadButton("download_temperature_template", "Download Template", class = "download-button"),
-        tags$p(class = "help-note", "Uploaded scenarios are included in the downloaded CSV results but are not plotted.")
       ),
       div(
         class = "panel-card action-row",
         h4("Actions"),
-        actionButton("plot_button", "Plot", class = "plot-button"),
+        actionButton("plot_button", "Calculate", class = "plot-button"),
         uiOutput("download_ui")
       )
     ),
@@ -225,7 +243,7 @@ ui <- fluidPage(
           width = 4,
           div(
             class = "summary-card",
-            span(class = "summary-label", HTML("Annual NH<sub>3</sub> Emission")),
+            span(class = "summary-label", textOutput("summary_nh3_label", inline = TRUE)),
             div(class = "summary-value", uiOutput("summary_nh3", inline = TRUE))
           )
         ),
@@ -238,11 +256,7 @@ ui <- fluidPage(
           )
         )
       ),
-      div(
-        class = "panel-card",
-        plotOutput("ef_plot", height = "460px"),
-        tags$div(class = "results-caption", textOutput("plot_caption"))
-      ),
+      uiOutput("plot_panel"),
       div(
         class = "panel-card",
         h4("Primary Scenario Results"),
@@ -251,4 +265,3 @@ ui <- fluidPage(
     )
   )
 )
-
