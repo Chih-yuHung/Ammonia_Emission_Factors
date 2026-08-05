@@ -28,6 +28,7 @@ temperature `T_air` from `Inputs/NH3_Correction_Factors.xlsx`.
 #| warning: false
 
 library(readxl)
+library(tidyverse)
 
 # Month order used in the climate workbook.
 month_labels <- c(
@@ -554,6 +555,7 @@ for (row_index in seq_len(nrow(factors))) {
       EF_MC_Mean = round(mean(ef_sim, na.rm = TRUE), 3),
       EF_MC_Lower95 = round(as.numeric(quantile(ef_sim, 0.025, na.rm = TRUE)), 3),
       EF_MC_Upper95 = round(as.numeric(quantile(ef_sim, 0.975, na.rm = TRUE)), 3),
+      
       CT_Threshold_C = threshold_c,
       stringsAsFactors = FALSE
     )
@@ -565,7 +567,9 @@ for (row_index in seq_len(nrow(factors))) {
 mc_summary <- do.call(rbind, mc_summary_rows)
 ```
 
-## Monte Carlo Summary
+## Monte Carlo Summary 
+
+Expand the summary table for Table 4.3 Tier 2 Housing Emission Factors by animal category, manure management system, climate zone (kg NH3-N kg N-1)
 
 ```{r}
 #| label: monte-carlo-summary
@@ -573,6 +577,13 @@ mc_summary <- do.call(rbind, mc_summary_rows)
 #| warning: false
 
 head(mc_summary)
+
+mc_summary <- mc_summary %>%
+  mutate(`CI_lower%` = round((EF_MC_Lower95 - EF_Deterministic) / EF_Deterministic,2) ,
+         `CI_upper%` = round((EF_MC_Upper95 - EF_Deterministic) / EF_Deterministic,2))
+          
+   
+
 ```
 
 ## Validation

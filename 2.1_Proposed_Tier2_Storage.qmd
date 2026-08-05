@@ -22,6 +22,7 @@ the third simulation year. Only the April and October removal schedule is used.
 #| warning: false
 
 library(readxl)
+library(tidyverse)
 
 # Month order used in the climate workbook and storage simulation.
 month_labels <- c(
@@ -619,6 +620,12 @@ for (row_index in seq_len(nrow(factors))) {
 mc_summary <- do.call(rbind, mc_summary_rows)
 
 head(mc_summary)
+
+#Calculate CI% for Table 4.4 Tier 2 Manure storage emission factors by animal category, manure management system
+mc_summary <- mc_summary %>%
+  mutate(`CI_lower%` = round((EF_MC_Lower95 - EF_Deterministic) / EF_Deterministic,2) ,
+         `CI_upper%` = round((EF_MC_Upper95 - EF_Deterministic) / EF_Deterministic,2))
+
 ```
 
 ## Validation
